@@ -223,7 +223,7 @@ st.markdown(
   --ok: #1f7a4d;
 }
 
-.stApp, .stApp p, .stApp label, .stApp div {
+.stApp, .stApp p, .stApp span, .stApp label, .stApp div {
   font-family: "IBM Plex Sans", sans-serif;
 }
 
@@ -553,6 +553,21 @@ ul[role="listbox"] li {
   color: #0f1c2e !important;
   border-color: #8ccfc5 !important;
   box-shadow: 0 2px 8px rgba(13,148,136,0.10);
+}
+
+/* Expander: giữ icon và nhãn trên cùng một hàng, không chồng chữ */
+div[data-testid="stExpander"] details summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  line-height: 1.4;
+}
+div[data-testid="stExpander"] details summary > span,
+div[data-testid="stExpander"] details summary svg {
+  flex: 0 0 auto;
+}
+div[data-testid="stExpander"] details summary p {
+  margin: 0;
 }
 
 /* Primary button */

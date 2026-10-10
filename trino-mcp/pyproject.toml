@@ -1,0 +1,61 @@
+[project]
+name = "trino-mcp"
+dynamic = ["version"]
+description = "A simple Model Context Protocol (MCP) server for Trino with OAuth support"
+readme = "README_PYPI.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["mcp", "trino", "model-context-protocol", "llm", "ai"]
+authors = [
+    { name = "Trino MCP Contributors" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    # mcp 2.0.0 removed `mcp.server.fastmcp` (renamed to `mcp.server.mcpserver`,
+    # `FastMCP` -> `MCPServer`). Lift this cap only together with that migration.
+    "mcp>=1.6.0,<2",
+    "trino>=0.333.0",
+    "python-dotenv>=1.0.0",
+    "sqlglot>=27.0.0",
+]
+
+[project.optional-dependencies]
+azure = ["azure-identity>=1.14.0"]
+
+[project.urls]
+Homepage = "https://github.com/weijie-tan3/trino-mcp"
+Repository = "https://github.com/weijie-tan3/trino-mcp"
+Issues = "https://github.com/weijie-tan3/trino-mcp/issues"
+Documentation = "https://github.com/weijie-tan3/trino-mcp#readme"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/trino_mcp/_version.py"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+trino-mcp = "trino_mcp.server:main"

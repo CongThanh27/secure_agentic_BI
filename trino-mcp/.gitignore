@@ -1,0 +1,41 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# Environment / secrets
+.env
+.env-user
+.envrc
+
+# Test / coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+.hypothesis/
+
+# IDE
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# Generated docs (available as CI artifacts)
+TOOLS.md
+tools.json
+
+# Auto-generated version file (hatch-vcs)
+src/trino_mcp/_version.py
