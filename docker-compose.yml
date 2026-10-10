@@ -1,0 +1,52 @@
+# docker-compose.yml
+# Khởi tạo PostgreSQL (analytics_db) và Trino Coordinator trên cùng một
+# Docker network để Trino có thể truy cập PostgreSQL bằng hostname postgres-db. định nghĩa, cấu hình và khởi chạy đồng thời nhiều container (ở đây là PostgreSQL và Trino) trong cùng một môi trường mạng nội bộ, giúp chúng có thể giao tiếp được với nhau.
+# File này gồm volume dữ liệu PostgreSQL, mount init.sql và catalog Trino.
+
+services:
+  postgres-db:
+    image: postgres:16
+    container_name: secure-bi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: analytics_db
+      POSTGRES_USER: bi_user
+      POSTGRES_PASSWORD: securepassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - bi-network
+      # Gắn container này vào một mạng ảo tên là bi-network.
+
+  trino-coordinator:
+    image: trinodb/trino:latest
+    container_name: secure-bi-trino
+    restart: unless-stopped
+    depends_on:
+      - postgres-db
+      # Chỉ thị cho Docker Compose phải chạy dịch vụ postgres-db trước, sau đó mới chạy trino-coordinator.
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./catalog:/etc/trino/catalog:ro
+    networks:
+      - bi-network
+
+volumes:
+  postgres_data:
+
+networks:
+  bi-network:
+    driver: bridge
+    # sử dụng bridge driver, tạo một mạng LAN ảo nội bộ để các container giao tiếp với nhau bằng hostname (ví dụ: ping postgres-db).
+
+# Cách chạy:
+#   docker compose up -d
+# Truy cập Trino tại http://localhost:8080.
+# Dừng hệ thống:
+#   docker compose down
+# Xóa cả dữ liệu PostgreSQL:
+#   docker compose down -v

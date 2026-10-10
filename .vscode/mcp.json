@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "trino-mcp": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "trino-mcp"
+      ],
+      "cwd": "${workspaceFolder}/trino-mcp"
+    }
+  }
+}
