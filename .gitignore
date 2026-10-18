@@ -43,4 +43,6 @@ src/trino_mcp/_version.py
 # Local configuration files
 config.json
 
-
+trino-mcp/.venv/
+trino-mcp/.env
+trino-mcp/.vscode/
