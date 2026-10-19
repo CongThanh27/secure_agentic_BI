@@ -3,6 +3,7 @@
 import logging
 
 import sqlglot
+from sqlglot import exp
 from sqlglot.expressions import (
     Alter,
     Analyze,
@@ -87,3 +88,32 @@ def is_read_only_query(query: str) -> bool:
 
     # Walk the AST for any write operation
     return not any(isinstance(node, WRITE_TYPES) for node in expr.walk())
+
+
+def referenced_tables(query: str) -> list[str] | None:
+    """Return table names referenced by a Trino statement.
+
+    Names stay as written: ``catalog.schema.table`` when fully qualified,
+    otherwise fewer parts. CTE aliases are omitted. Returns None when the
+    statement cannot be parsed.
+    """
+    try:
+        expr = sqlglot.parse_one(query, read="trino")
+    except Exception as e:
+        logger.warning(f"Failed to parse query for table references: {str(e)}")
+        return None
+
+    cte_names = set()
+    for cte in expr.find_all(exp.CTE):
+        alias = cte.alias_or_name
+        if alias:
+            cte_names.add(alias.lower())
+
+    names: list[str] = []
+    for table in expr.find_all(exp.Table):
+        table_name = table.name
+        if not table_name or table_name.lower() in cte_names:
+            continue
+        parts = [part for part in (table.catalog, table.db, table.name) if part]
+        names.append(".".join(parts).lower())
+    return names

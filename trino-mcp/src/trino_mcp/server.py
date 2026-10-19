@@ -13,6 +13,7 @@ from pydantic import Field
 
 from .config import load_config
 from .client import QueryTimeoutError, TrinoClient
+from .policy import check_table_access, load_role_policy
 from .utils import is_read_only_query as _is_read_only_query
 
 # Setup logging
@@ -333,11 +334,15 @@ async def execute_query_read_only(
             description="File path to write results to. Format is derived from the file extension: '.csv' for CSV, '.json' (or others) for JSON. When set, results are written directly to disk and are NOT returned to the AI, preventing hallucinated values and enabling subsequent processing by other tools."
         ),
     ] = "",
+    role: str = Field(
+        default="",
+        description="Caller role from the application session. Used to enforce agent_role_permissions.",
+    ),
 ) -> str:
     """Execute a read-only SQL query and return the results.
 
     This tool is designed for read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, etc.).
-    It validates that the query is read-only before execution.
+    It validates that the query is read-only, then checks the role's table allow-list.
 
     When output_file is provided, results are written directly to disk and only a
     confirmation message is returned. This prevents raw data from passing through
@@ -361,6 +366,16 @@ async def execute_query_read_only(
             "If you need to execute write operations (INSERT, UPDATE, DELETE, CREATE, DROP, etc.), "
             "use the 'execute_query' tool instead (requires ALLOW_WRITE_QUERIES=true)."
         )
+
+    if not role:
+        return "Error: role is required."
+    policy = await asyncio.to_thread(load_role_policy, client, role)
+    if policy is None:
+        return f"Error: role '{role}' is not permitted."
+    denial = check_table_access(query, policy, output_file=output_file)
+    if denial:
+        logger.warning(f"Role {role} denied query: {denial}")
+        return denial
 
     # Execute the query using the common function
     if _query_semaphore is not None and _query_semaphore.locked():

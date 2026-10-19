@@ -8,6 +8,15 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from trino_mcp.policy import RolePolicy
+
+_ADMIN_POLICY = RolePolicy(
+    allowed_tables=frozenset(),
+    denied_tables=frozenset(),
+    can_export_file=True,
+    allow_all=True,
+)
+
 
 # Set environment variables before importing server module
 @pytest.fixture(scope="module", autouse=True)
@@ -104,14 +113,15 @@ def test_describe_table_tool(mock_client):
     mock_client.describe_table.assert_called_once_with("catalog1", "schema1", "table1")
 
 
+@patch("trino_mcp.server.load_role_policy", return_value=_ADMIN_POLICY)
 @patch("trino_mcp.server.client")
-def test_execute_query_read_only_tool(mock_client):
+def test_execute_query_read_only_tool(mock_client, _policy):
     """Test execute_query_read_only tool with SELECT query."""
     from trino_mcp.server import execute_query_read_only
 
     mock_client.execute_query_json.return_value = '[{"col": "value"}]'
 
-    result = asyncio.run(execute_query_read_only("SELECT 1"))
+    result = asyncio.run(execute_query_read_only("SELECT 1", role="admin"))
 
     assert "value" in result
     mock_client.execute_query_json.assert_called_once_with("SELECT 1")
@@ -148,22 +158,23 @@ def test_execute_query_read_only_blocks_write_queries(mock_client, query):
     "query,expected_content",
     [
         ("SHOW TABLES", "table"),
-        ("DESCRIBE my_table", "column"),
-        ("EXPLAIN SELECT * FROM table", "plan"),
+        ("DESCRIBE pg.public.products", "column"),
+        ("EXPLAIN SELECT * FROM pg.public.products", "plan"),
         ("SHOW SCHEMAS", "schema"),
         ("SHOW CATALOGS", "catalog"),
     ],
 )
+@patch("trino_mcp.server.load_role_policy", return_value=_ADMIN_POLICY)
 @patch("trino_mcp.server.client")
 def test_execute_query_read_only_allows_read_queries(
-    mock_client, query, expected_content
+    mock_client, _policy, query, expected_content
 ):
     """Test execute_query_read_only tool allows read-only queries."""
     from trino_mcp.server import execute_query_read_only
 
     mock_client.execute_query_json.return_value = f'[{{"{expected_content}": "test"}}]'
 
-    result = asyncio.run(execute_query_read_only(query))
+    result = asyncio.run(execute_query_read_only(query, role="admin"))
 
     assert "test" in result
     mock_client.execute_query_json.assert_called_once_with(query)
@@ -237,14 +248,17 @@ def test_mcp_server_initialization():
     assert mcp.name == "Trino MCP Server"
 
 
+@patch("trino_mcp.server.load_role_policy", return_value=_ADMIN_POLICY)
 @patch("trino_mcp.server.client")
-def test_execute_query_read_only_output_file_csv(mock_client):
+def test_execute_query_read_only_output_file_csv(mock_client, _policy):
     """Test execute_query_read_only with .csv output_file delegates to execute_query_to_file."""
     from trino_mcp.server import execute_query_read_only
 
     mock_client.execute_query_to_file.return_value = 2
 
-    result = asyncio.run(execute_query_read_only("SELECT 1", output_file="/tmp/results.csv"))
+    result = asyncio.run(
+        execute_query_read_only("SELECT 1", output_file="/tmp/results.csv", role="admin")
+    )
 
     assert "results.csv" in result
     assert "2 row(s)" in result
@@ -271,14 +285,17 @@ def test_execute_query_output_file_csv(mock_config, mock_client):
     )
 
 
+@patch("trino_mcp.server.load_role_policy", return_value=_ADMIN_POLICY)
 @patch("trino_mcp.server.client")
-def test_execute_query_read_only_output_file(mock_client):
+def test_execute_query_read_only_output_file(mock_client, _policy):
     """Test execute_query_read_only with output_file delegates to execute_query_to_file."""
     from trino_mcp.server import execute_query_read_only
 
     mock_client.execute_query_to_file.return_value = 5
 
-    result = asyncio.run(execute_query_read_only("SELECT 1", output_file="/tmp/results.json"))
+    result = asyncio.run(
+        execute_query_read_only("SELECT 1", output_file="/tmp/results.json", role="admin")
+    )
 
     assert "results.json" in result
     assert "5 row(s)" in result
@@ -470,14 +487,15 @@ def test_get_table_stats_error(mock_client):
     assert "Stats unavailable" in result
 
 
+@patch("trino_mcp.server.load_role_policy", return_value=_ADMIN_POLICY)
 @patch("trino_mcp.server.client")
-def test_execute_query_read_only_query_error(mock_client):
+def test_execute_query_read_only_query_error(mock_client, _policy):
     """Test execute_query_read_only tool when query execution raises an exception."""
     from trino_mcp.server import execute_query_read_only
 
     mock_client.execute_query_json.side_effect = Exception("Timeout")
 
-    result = asyncio.run(execute_query_read_only("SELECT 1"))
+    result = asyncio.run(execute_query_read_only("SELECT 1", role="admin"))
 
     assert "Error executing query" in result
     assert "Timeout" in result
