@@ -7,7 +7,7 @@
         "run",
         "trino-mcp"
       ],
-      "cwd": "${workspaceFolder}/trino-mcp"
+      "cwd": "${workspaceFolder}/mcp_servers/trino-mcp"
     }
   }
 }
