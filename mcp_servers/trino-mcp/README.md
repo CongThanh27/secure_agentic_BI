@@ -1,0 +1,450 @@
+# Trino MCP Server
+
+[![CI](https://github.com/weijie-tan3/trino-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/weijie-tan3/trino-mcp/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/weijie-tan3/trino-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/weijie-tan3/trino-mcp)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI](https://img.shields.io/pypi/v/trino-mcp.svg)](https://pypi.org/project/trino-mcp/)
+
+A simple Model Context Protocol (MCP) server for Trino query engine with OAuth and Azure Service Principal (SPN) support.
+
+## Quick Start (TL;DR)
+
+**Using with VS Code?** Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "trino": {
+      "command": "uvx",
+      "args": ["trino-mcp"],
+      "env": {
+        "TRINO_HOST": "${trino_host_address}",
+        "TRINO_USER": "${env:USER}",
+        "AUTH_METHOD": "OAuth2"
+        // "ALLOW_WRITE_QUERIES": "true"  // Enable write operations (disabled by default)
+      }
+    }
+  }
+}
+```
+
+**Want to run standalone?**
+```bash
+# Run directly with CLI flags (no installation needed)
+uvx trino-mcp --trino-host localhost --trino-port 8080 --auth-method NONE
+
+# Or use a .env file — just run in the same directory
+uvx trino-mcp
+```
+
+That's it! The server will connect to your Trino cluster and provide query capabilities.
+
+---
+
+## Features
+
+- **Core Trino Operations** without over-complication: Query catalogs, schemas, tables, and execute SQL
+- **Multiple Auth Methods**: OAuth2, Azure Service Principal (SPN, >=v0.1.4), basic username/password, or no auth
+  - **Azure SPN with Auto-Refresh**: Tokens are automatically refreshed before each request — no expiry issues for long-running servers
+- **CLI flags** (>=v0.2.1): Pass all configuration via `--trino-host`, `--auth-method`, etc. — no env vars or `.env` file required
+- **uvx Compatible**: Run directly with `uvx` without installation
+- **Double-Write Protection**: Two layers of safety — separate read-only and read-write tools (`execute_query_read_only` vs `execute_query`), plus an `ALLOW_WRITE_QUERIES` configuration flag that must be explicitly enabled before any write query can run
+- **File Export** (>=v0.2.0): Write query results directly to disk (JSON or CSV, derived from file extension) to enable subsequent processing by other tools while preventing LLM hallucination on raw data
+- **Query Watermarking**: Automatically adds watermark comments to queries for tracking and auditing (includes username and version).
+  - Support for custom watermark key-value pairs via `TRINO_MCP_CUSTOM_WATERMARK` (>=v0.2.0)
+
+## Prerequisites
+
+- Python 3.10 or higher
+- A running Trino server
+- (Optional) Trino credentials for authentication
+- (Optional) [uvx](https://docs.astral.sh/uv/guides/tools/)
+
+## Setup & Configuration
+
+General recommendation: using `uvx` or `uv`.
+```bash
+# From PyPI
+uv pip install trino-mcp
+
+# From PyPI
+uvx trino-mcp
+
+# Clone to local directory and install
+uv pip install .
+trino-mcp
+```
+
+### Using with Claude Desktop
+
+Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+```json
+{
+  "mcpServers": {
+    "trino": {
+      "command": "uvx",
+      "args": ["trino-mcp"],
+      "env": {
+        "TRINO_HOST": "localhost",
+        "TRINO_PORT": "8080",
+        "TRINO_USER": "trino"
+        // "ALLOW_WRITE_QUERIES": "true"  // Enable write operations if needed
+      }
+    }
+  }
+}
+```
+
+### Using with VS Code
+Add to `.vscode/mcp.json`:
+```json
+{
+  "servers": {
+    "trino": {
+      "command": "uvx",
+      "args": ["trino-mcp"],
+      "env": {
+        "TRINO_HOST": "${trino_host_address}",
+        "TRINO_USER": "${env:USER}",
+        "AUTH_METHOD": "OAuth2"
+        // "ALLOW_WRITE_QUERIES": "true"  // Enable write operations if needed
+      }
+    }
+  }
+}
+```
+
+### Configuration Priority
+
+The server accepts configuration from three sources. When the same setting is provided in multiple places, **CLI flags take the highest priority**:
+
+| Priority | Source | Example |
+|---|---|---|
+| 1 (highest) | CLI flags | `uvx trino-mcp --trino-host myhost` |
+| 2 | Shell environment variables | `TRINO_HOST=myhost uvx trino-mcp` |
+| 3 (lowest) | `.env` file | `TRINO_HOST=myhost` in `.env` |
+
+### CLI Flags
+
+All configuration can be passed as command-line arguments:
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--trino-host` | `TRINO_HOST` | `localhost` | Trino server hostname |
+| `--trino-port` | `TRINO_PORT` | `8080` | Trino server port (auto-set to `443` for OAuth2/Azure SPN) |
+| `--trino-user` | `TRINO_USER` | `trino` | Username |
+| `--trino-catalog` | `TRINO_CATALOG` | — | Default catalog |
+| `--trino-schema` | `TRINO_SCHEMA` | — | Default schema |
+| `--trino-http-scheme` | `TRINO_HTTP_SCHEME` | `http` | `http` or `https` (auto-set to `https` for OAuth2/Azure SPN) |
+| `--auth-method` | `AUTH_METHOD` | `NONE` | `NONE`, `PASSWORD`, `OAUTH2`, or `AZURE_SPN` |
+| `--trino-password` | `TRINO_PASSWORD` | — | Password for `PASSWORD` auth |
+| `--azure-scope` | `AZURE_SCOPE` | — | Azure token scope for `AZURE_SPN` auth |
+| `--azure-client-id` | `AZURE_CLIENT_ID` | — | Azure client ID for `AZURE_SPN` auth |
+| `--azure-client-secret` | `AZURE_CLIENT_SECRET` | — | Azure client secret for `AZURE_SPN` auth |
+| `--azure-tenant-id` | `AZURE_TENANT_ID` | — | Azure tenant ID for `AZURE_SPN` auth |
+| `--allow-write-queries` | `ALLOW_WRITE_QUERIES` | `false` | Enable write operations (`true`, `1`, or `yes`) |
+| `--custom-watermark` | `TRINO_MCP_CUSTOM_WATERMARK` | — | JSON object for custom query watermark (values can be literal or `env:VAR`) |
+| `--session-properties` | `TRINO_SESSION_PROPERTIES` | — | JSON object of Trino session properties (e.g. `{"query_max_run_time": "30s"}`) |
+| `--query-timeout-minutes` | `QUERY_TIMEOUT_MINUTES` | `5` | Client-side query timeout in minutes (`0` to disable) |
+| `--max-concurrent-queries` | `MAX_CONCURRENT_QUERIES` | `1` | Max concurrent tool calls; excess calls are rejected immediately |
+
+Example:
+```bash
+uvx trino-mcp \
+    --trino-host trino.example.com \
+    --trino-port 443 \
+    --trino-user myuser \
+    --trino-catalog hive \
+    --trino-schema default \
+    --trino-http-scheme https \
+    --auth-method AZURE_SPN \
+    --azure-scope "api://your-trino-app-id/.default" \
+    --azure-client-id your-client-id \
+    --azure-client-secret your-client-secret \
+    --azure-tenant-id your-tenant-id \
+    --allow-write-queries true \
+    --query-timeout-minutes 10 \
+    --max-concurrent-queries 3
+```
+
+Run `uvx trino-mcp --help` for the full list of flags.
+
+### Environment Variables
+
+Configure the server using environment variables or a `.env` file:
+
+```bash
+# Required
+TRINO_HOST=localhost              # Your Trino server hostname
+TRINO_PORT=8080                   # Trino server port (auto-set to 443 for Azure SPN/OAuth2)
+TRINO_USER=trino                  # Username (auto-detected from JWT for Azure SPN)
+TRINO_HTTP_SCHEME=http            # http or https (auto-set to https for Azure SPN/OAuth2)
+
+# Optional
+TRINO_CATALOG=my_catalog          # Default catalog
+TRINO_SCHEMA=my_schema            # Default schema
+
+# Authentication method: NONE (default), PASSWORD, OAUTH2, or AZURE_SPN
+AUTH_METHOD=PASSWORD
+
+# Option 1: Basic Authentication (AUTH_METHOD=PASSWORD)
+TRINO_PASSWORD=your_password
+
+# Option 2: OAuth2 (AUTH_METHOD=OAUTH2)
+# Uses Trino's built-in OAuth2 flow (browser-based)
+
+# Option 3: Azure Service Principal (AUTH_METHOD=AZURE_SPN)
+# See "Azure SPN Authentication" section below
+
+# Option 4: No auth (AUTH_METHOD=NONE)
+
+# Security
+ALLOW_WRITE_QUERIES=true          # Enable write operations (INSERT, UPDATE, DELETE, etc.)
+                                  # Disabled by default for safety
+                                  # accepts `true`, `1`, or `yes`
+
+# Custom Watermark
+# JSON object mapping watermark keys to values.
+# Use "env:VAR_NAME" to resolve from an environment variable,
+# or a plain string for a direct literal value.
+TRINO_MCP_CUSTOM_WATERMARK='{"team": "my-team", "app_id": "env:MY_APP_ID"}'
+```
+
+## Available Tools
+
+The Trino MCP server provides the following tools (see [`server.py`](src/trino_mcp/server.py) for full details):
+- `list_catalogs` - List all available Trino catalogs
+- `list_schemas` - List all schemas in a catalog
+- `list_tables` - List all tables in a schema
+- `describe_table` - Describe the structure of a table
+- `execute_query_read_only` - Execute read-only SQL queries (SELECT, SHOW, DESCRIBE, EXPLAIN)
+- `execute_query` - Execute any SQL query (requires `ALLOW_WRITE_QUERIES=true` for write operations)
+- `show_create_table` - Show the CREATE TABLE statement for a table
+- `get_table_stats` - Get statistics for a table
+
+### Exporting Query Results to File
+
+Both `execute_query` and `execute_query_read_only` support an `output_file` parameter that writes results directly to disk instead of returning them to the AI. This is useful for:
+
+- **Preventing LLM hallucination**: Large result sets passed through the AI may be summarized, truncated, or hallucinated. Writing to a file ensures data integrity.
+- **Subsequent processing**: The exported file can be read by other tools (e.g., a Python script) for accurate data processing without AI interpretation.
+
+The output format is automatically derived from the file extension:
+- `.csv` → CSV format (with header row)
+- `.json` (or any other extension) → JSON format
+
+When `output_file` is set, only a confirmation message with the row count is returned to the AI — the raw data never passes through the model.
+
+## Authentication
+
+### OAuth2
+
+Set `AUTH_METHOD=OAUTH2`. The Trino Python client handles the OAuth2 flow automatically through a browser-based redirect — no manual JWT handling required.
+
+### Azure Service Principal (SPN)
+
+For non-interactive / CI environments using Azure AD. Install with Azure extras:
+
+```bash
+# pip
+pip install trino-mcp[azure]
+
+# uv
+uv pip install trino-mcp[azure]
+
+# uvx (install azure-identity alongside)
+uvx --from "trino-mcp>=0.1.4" --with azure-identity trino-mcp
+```
+
+The server tries four credential methods in order:
+
+1. **GitHub Actions OIDC (ClientAssertionCredential)** — Best for GitHub Actions CI. Uses federated credentials to fetch fresh tokens from the Actions runtime. Requires `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`.
+2. **`az login` (AzureCliCredential)** — Easiest for local dev. Just run `az login --service-principal` beforehand.
+3. **Environment variables (ClientSecretCredential)** — For CI/CD with client secrets. Set `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AZURE_TENANT_ID`.
+4. **DefaultAzureCredential** — Fallback for managed identity, etc.
+
+`AZURE_SCOPE` is always required (the Trino server's Azure AD app scope, e.g. `api://<trino-app-id>/.default`).
+
+#### Option A: Using `az login` (local development)
+
+```bash
+# Login as the service principal
+az login --service-principal \
+    --username "$AZURE_CLIENT_ID" \
+    --password "$AZURE_CLIENT_SECRET" \
+    --tenant "$AZURE_TENANT_ID" \
+    --allow-no-subscriptions
+```
+
+`.env`:
+```bash
+AUTH_METHOD=AZURE_SPN
+AZURE_SCOPE=api://your-trino-app-id/.default
+TRINO_HOST=trino.example.com
+TRINO_CATALOG=hive
+TRINO_SCHEMA=default
+```
+
+#### Option B: Using environment variables (CI/CD)
+
+`.env`:
+```bash
+AUTH_METHOD=AZURE_SPN
+AZURE_SCOPE=api://your-trino-app-id/.default
+AZURE_CLIENT_ID=your-client-id
+AZURE_CLIENT_SECRET=your-client-secret
+AZURE_TENANT_ID=your-tenant-id
+TRINO_HOST=trino.example.com
+TRINO_CATALOG=hive
+TRINO_SCHEMA=default
+```
+
+#### Option C: GitHub Actions OIDC (federated credentials)
+
+For GitHub Actions workflows using `azure/login@v2` with OIDC. This avoids client secrets entirely and solves token expiry issues — the server fetches fresh OIDC tokens from the Actions runtime on every Azure AD token exchange.
+
+**Prerequisites:**
+- An Azure AD app registration with a **federated credential** configured to trust your GitHub repository's OIDC issuer (`https://token.actions.githubusercontent.com`).
+- The federated credential's subject claim must match your workflow (e.g. `repo:your-org/your-repo:ref:refs/heads/main` or `repo:your-org/your-repo:environment:production`).
+
+**Workflow setup:**
+
+```yaml
+jobs:
+  my-job:
+    permissions:
+      id-token: write   # Required — enables OIDC token requests
+      contents: read
+
+    steps:
+      - name: Azure OIDC Login
+        uses: azure/login@v2
+        with:
+          client-id: "<your-client-id>"
+          tenant-id: "<your-tenant-id>"
+          allow-no-subscriptions: true
+```
+
+**MCP config** — pass `--azure-client-id` and `--azure-tenant-id`:
+
+```json
+{
+  "trino-mcp": {
+    "type": "local",
+    "command": "uvx",
+    "args": [
+      "--from", "trino-mcp",
+      "--with", "azure-identity",
+      "trino-mcp",
+      "--trino-host", "trino.example.com",
+      "--auth-method", "AZURE_SPN",
+      "--azure-scope", "api://your-trino-app-id/.default",
+      "--azure-client-id", "<your-client-id>",
+      "--azure-tenant-id", "<your-tenant-id>",
+      "--trino-catalog", "hive",
+      "--trino-schema", "default"
+    ]
+  }
+}
+```
+
+The server automatically detects the GitHub Actions environment via `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (set by the runner when `id-token: write` is granted). No additional environment variables need to be forwarded.
+
+> **Why not just use `azure/login@v2` + AzureCliCredential?** The `az` CLI session from OIDC login holds a short-lived token that cannot be refreshed. After ~5 minutes, queries start failing. `ClientAssertionCredential` solves this by requesting fresh OIDC tokens from the Actions runtime on every Azure AD token exchange.
+
+#### VS Code MCP config for Azure SPN
+
+Using CLI flags (no `.env` file needed):
+```json
+{
+  "servers": {
+    "trino": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from", "trino-mcp>=0.2.1",
+        "--with", "azure-identity",
+        "trino-mcp",
+        "--trino-host", "trino.example.com",
+        "--auth-method", "AZURE_SPN",
+        "--azure-scope", "api://your-trino-app-id/.default"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+Or using `.env` file (the server reads it automatically):
+```json
+{
+  "servers": {
+    "trino": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "trino-mcp>=0.2.1", "--with", "azure-identity", "trino-mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+> **Token auto-refresh**: The server automatically refreshes Azure tokens before each Trino request, so it works reliably for long-running sessions without expiry issues.
+
+## Development
+
+```bash
+# Install development dependencies
+uv pip install -e ".[dev]"
+
+# Run tests (when available)
+pytest
+
+# Format code
+black src/
+
+# Type checking
+mypy src/
+```
+
+### Publishing a New Version
+
+See [docs/dev.md](docs/dev.md) for release instructions.
+
+### Known Issues
+
+**Pytest exits with code 137 (SIGKILL)**
+
+If tests hang or exit with code 137, there may be stuck `trino-mcp` or `uv` processes consuming resources. Try killing them:
+
+```bash
+# Check for stuck processes
+ps aux | grep -E "trino-mcp|uvx" | grep -v grep
+
+# Kill if found
+pkill -f trino-mcp
+```
+
+**Copilot CLI MCP error -32001: Request timed out**
+
+When a Trino query takes longer than the MCP client's internal request timeout (~3 minutes in Copilot CLI), the client reports `MCP error -32001: Request timed out`. The query itself continues running on the Trino server even after the MCP request has timed out.
+
+Mitigation: set `--query-timeout-minutes` to a value shorter than the client timeout (e.g. `2`). This ensures the server cancels the Trino query via `cursor.cancel()` before the client gives up, so you get a clear timeout error message instead of a raw `-32001`.
+
+Note: even if the `--query-timeout-minutes` is longer than the MCP client request timeout error, the query cancellation still work.
+
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+
+For issues and questions:
+- [Open an issue on GitHub](https://github.com/weijie-tan3/trino-mcp/issues)
+- Check Trino documentation: https://trino.io/docs/
+- Check MCP documentation: https://modelcontextprotocol.io/
