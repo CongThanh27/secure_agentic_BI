@@ -4,6 +4,7 @@ from agent.llm import AVAILABLE_MODELS
 from agent.mcp_client import run_mcp_tool_sync
 from agent.planner import plan_query
 from agent.prompts import TOOL_NAME
+from agent.reflexion import classify_execution, execute_with_reflexion, reflect_query
 from agent.synthesizer import synthesize_final_answer
 
 ROLES = ["analyst", "sales", "support", "hr", "admin"]
@@ -857,34 +858,72 @@ with tab2:
                         ) as status:
                             planner_args = tool_call.get("arguments") or {}
                             query = planner_args.get("query") or ""
+                            output_file = planner_args.get("output_file")
+                            trace = None
                             if not query:
                                 result_from_mcp = "Error: Planner did not return a SQL query."
                             else:
-                                arguments = {"query": query, "role": selected_role}
-                                output_file = planner_args.get("output_file")
-                                if output_file:
-                                    arguments["output_file"] = output_file
-                                result_from_mcp = run_mcp_tool_sync(TOOL_NAME, arguments)
 
-                            if "LỖI GUARDRAIL" in result_from_mcp or result_from_mcp.startswith(
-                                "Error:"
-                            ):
-                                status.update(
-                                    label="🛑 Tấn công bị chặn đứng!",
-                                    state="error",
-                                    expanded=True,
-                                )
+                                def _execute(sql: str) -> str:
+                                    arguments = {"query": sql, "role": selected_role}
+                                    if output_file:
+                                        arguments["output_file"] = output_file
+                                    return run_mcp_tool_sync(TOOL_NAME, arguments)
+
+                                def _reflect(failed_sql: str, error: str):
+                                    return reflect_query(
+                                        user_input, failed_sql, error, selected_model
+                                    )
+
+                                trace = execute_with_reflexion(query, _execute, _reflect)
+                                result_from_mcp = trace.result
+                                for index, attempt in enumerate(trace.attempts, start=1):
+                                    if attempt.outcome != "retry":
+                                        continue
+                                    st.warning(
+                                        f"Lần {index}: lỗi kỹ thuật, sửa SQL rồi chạy lại."
+                                    )
+                                    st.code(attempt.query, language="sql")
+                                    st.caption(attempt.result)
+
+                            blocked = trace is None or trace.outcome != "ok"
+                            security_stop = blocked and (
+                                trace is None
+                                or classify_execution(trace.result) == "abort"
+                            )
+                            if blocked:
+                                if security_stop:
+                                    status.update(
+                                        label="🛑 Tấn công bị chặn đứng!",
+                                        state="error",
+                                        expanded=True,
+                                    )
+                                else:
+                                    status.update(
+                                        label="🛑 SQL vẫn lỗi sau khi sửa",
+                                        state="error",
+                                        expanded=True,
+                                    )
                                 st.error(result_from_mcp)
-                                raw_data_to_llm = (
-                                    "Hệ thống bảo mật đã chặn truy vấn với lý do: "
-                                    f"{result_from_mcp}"
-                                )
+                                if security_stop:
+                                    raw_data_to_llm = (
+                                        "Hệ thống bảo mật đã chặn truy vấn với lý do: "
+                                        f"{result_from_mcp}"
+                                    )
+                                else:
+                                    raw_data_to_llm = (
+                                        "Truy vấn vẫn lỗi sau khi sửa SQL: "
+                                        f"{result_from_mcp}"
+                                    )
                             else:
                                 status.update(
                                     label="✅ Truy vấn thành công!",
                                     state="complete",
                                     expanded=True,
                                 )
+                                if trace is not None and len(trace.attempts) > 1:
+                                    st.caption("SQL sau khi sửa")
+                                    st.code(trace.query, language="sql")
                                 st.success(result_from_mcp)
 
                                 if "output_file" not in tool_call["arguments"]:

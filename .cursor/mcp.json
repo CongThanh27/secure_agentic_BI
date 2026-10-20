@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "trino-local-proxy": {
-      "command": "/Users/nguyenthanh/Master/NewGenerationSoftwareEngineering/pro/pro/secure_agentic_BI/trino-mcp/.venv/bin/python",
+      "command": "${workspaceFolder}/trino-mcp/.venv/Scripts/python.exe",
       "args": [
         "-m",
         "trino_mcp"

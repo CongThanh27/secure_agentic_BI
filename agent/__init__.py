@@ -1,1 +1,1 @@
-"""Planner and synthesizer for the main BI flow."""
+"""Planner, guarded reflexion, and synthesizer for the main BI flow."""
