@@ -1,10 +1,9 @@
 # pip install -r requirements.txt
 # Python 3.10+
 #
-# The gateway package lives in trino-mcp/src and is not installed from this file.
-# Before `streamlit run app3.py`, set:
-#   $env:PYTHONPATH = "trino-mcp/src"
-#   $env:TRINO_MCP_PYTHON = "python"
+# The gateway package lives in trino-mcp/src.
+# app3.py launches trino-mcp/.venv automatically.
+# Set TRINO_MCP_PYTHON only to override that interpreter.
 
 # Streamlit UI and agent (app3.py)
 streamlit==1.58.0

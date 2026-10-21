@@ -2,22 +2,52 @@
 
 import asyncio
 import os
+import shutil
+import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-_DEFAULT_PYTHON_BIN = (
-    "/Users/nguyenthanh/Master/NewGenerationSoftwareEngineering/pro/pro/"
-    "secure_agentic_BI/trino-mcp/.venv/bin/python"
-)
-PYTHON_BIN_PATH = os.environ.get("TRINO_MCP_PYTHON", _DEFAULT_PYTHON_BIN)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TRINO_MCP_ROOT = os.path.join(_PROJECT_ROOT, "trino-mcp")
+_TRINO_MCP_SRC = os.path.join(_TRINO_MCP_ROOT, "src")
+
+
+def resolve_python_bin() -> str:
+    """Interpreter that can launch `python -m trino_mcp`."""
+    override = os.environ.get("TRINO_MCP_PYTHON")
+    if override:
+        if os.path.isfile(override):
+            return override
+        found = shutil.which(override)
+        if found:
+            return found
+    for relative in (
+        os.path.join(".venv", "Scripts", "python.exe"),
+        os.path.join(".venv", "bin", "python"),
+    ):
+        candidate = os.path.join(_TRINO_MCP_ROOT, relative)
+        if os.path.isfile(candidate):
+            return candidate
+    return sys.executable
+
+
+def mcp_child_env() -> dict[str, str]:
+    """Parent environment plus the gateway source tree on PYTHONPATH."""
+    env = os.environ.copy()
+    parts = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    if _TRINO_MCP_SRC not in parts:
+        parts.insert(0, _TRINO_MCP_SRC)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
 
 
 async def execute_mcp_tool(tool_name: str, arguments: dict) -> str:
     server_params = StdioServerParameters(
-        command=PYTHON_BIN_PATH,
+        command=resolve_python_bin(),
         args=["-m", "trino_mcp"],
-        env=None,
+        env=mcp_child_env(),
+        cwd=_TRINO_MCP_ROOT,
     )
 
     async with stdio_client(server_params) as (read, write):
