@@ -1,16 +1,18 @@
 # KỊCH BẢN TRÌNH BÀY BÁO CÁO GIỮA KỲ (SLIDE PRESENTATION)
+
 ## ĐỀ TÀI: SECURE AGENTIC BI FRAMEWORK
+
 ### KIẾN TRÚC PHÒNG THỦ NEURO-SYMBOLIC VÀ GIAO THỨC MCP CHO HỆ THỐNG TRÍ TUỆ KINH DOANH TỰ TRỊ
 
 ---
 
 **THÔNG TIN TỔNG QUAN:**
+
 * **Môn học:** Công nghệ Phần mềm Thế hệ Mới (CO5151) – Học kỳ 1, Năm học 2026–2027
 * **Đơn vị đào tạo:** Khoa Khoa học và Kỹ thuật Máy tính – Đại học Bách Khoa TP. Hồ Chí Minh
 * **Giảng viên hướng dẫn:** TS. Lê Xuân Bách
 * **Nhóm học viên thực hiện (Nhóm 6):**
-  * Nguyễn Công Thành (MSHV: 2470744) — *Trưởng nhóm / Trình bày chính*
-  * Cao Nguyễn Minh Hiếu (MSHV: 2470575)
+  * Nguyễn Công Thành (MSHV: 2470744) 
   * Nguyễn Hữu Lợi (MSHV: 2470012)
   * Phạm Quỳnh Trân (MSHV: 2470731)
 * **Tổng thời lượng trình bày:** Đúng 15 phút (00:00 – 15:00)
@@ -42,6 +44,7 @@
 ---
 
 ### SLIDE 01: TIÊU ĐỀ & GIỚI THIỆU ĐỀ TÀI
+
 * **Thời lượng:** 1.0 phút (Mốc: 00:00 – 01:00)
 * **Tiêu đề Slide:** SECURE AGENTIC BI FRAMEWORK
 * **Phụ đề:** Kiến trúc Phòng thủ Neuro-Symbolic và Giao thức Model Context Protocol (MCP) cho Hệ thống Trí tuệ Doanh nghiệp Tự trị
@@ -60,6 +63,7 @@
 ---
 
 ### SLIDE 02: BỐI CẢNH & KHOẢNG TRỐNG KỸ THUẬT (PROBLEM STATEMENT)
+
 * **Thời lượng:** 1.5 phút (Mốc: 01:00 – 02:30)
 * **Tiêu đề Slide:** Chat-with-Data: Tiềm Năng Đột Phá & Hiểm Họa Tiềm Ẩn
 * **Nội dung hiển thị trên slide:**
@@ -79,28 +83,30 @@
 ---
 
 ### SLIDE 03: BƯỚC CHUYỂN DỊCH CHIẾN LƯỢC: KIẾN TRÚC NEURO-SYMBOLIC
+
 * **Thời lượng:** 1.5 phút (Mốc: 02:30 – 04:00)
 * **Tiêu đề Slide:** Đột Phá Giữa Kỳ: Từ Pure Neural Sang Neuro-Symbolic
 * **Nội dung hiển thị trên slide:**
   * **Bảng so sánh: Proposal ban đầu vs Hiện thực hóa Giữa kỳ:**
 
-| Thành Phần Thiết Kế | Đề Xuất Ban Đầu (Proposal W1) | Đã Cài Đặt Giữa Kỳ (Checkpoint W7) |
-| :--- | :--- | :--- |
-| **Cơ chế Bảo vệ Chính** | Dựa vào System Prompt cấm đoán + Regex thô | **AST Parser (`sqlglot`) tất định (Deterministic)** |
-| **Kiểm soát Tài nguyên** | Không có giới hạn tài nguyên tính toán | **Circuit Breaker (Timeout 3-10s) + Concurrency Semaphore** |
-| **Phòng thủ Dữ liệu Bảng** | Trả dữ liệu thô thẳng vào LLM Context | **Table Content Taint Filter (Passive Data) + Tham số `output_file`** |
-| **Quản trị Bộ nhớ** | Kế hoạch dùng ChromaDB tự do ghi nhận | **Tạm hoãn ChromaDB, áp dụng Strict Policy & Re-validation trên MySQL** |
-| **Cấu trúc Dữ liệu** | 1 CSDL đơn lẻ (SQLite hoặc Postgres) | **Federated Trino: 21 bảng kết hợp PostgreSQL + MySQL** |
+| Thành Phần Thiết Kế        | Đề Xuất Ban Đầu (Proposal W1)              | Đã Cài Đặt Giữa Kỳ (Checkpoint W7)                                      |
+| :------------------------- | :----------------------------------------- | :---------------------------------------------------------------------- |
+| **Cơ chế Bảo vệ Chính**    | Dựa vào System Prompt cấm đoán + Regex thô | **AST Parser (**`sqlglot`**) tất định (Deterministic)**                 |
+| **Kiểm soát Tài nguyên**   | Không có giới hạn tài nguyên tính toán     | **Circuit Breaker (Timeout 3-10s) + Concurrency Semaphore**             |
+| **Phòng thủ Dữ liệu Bảng** | Trả dữ liệu thô thẳng vào LLM Context      | **Table Content Taint Filter (Passive Data) + Tham số** `output_file`   |
+| **Quản trị Bộ nhớ**        | Kế hoạch dùng ChromaDB tự do ghi nhận      | **Tạm hoãn ChromaDB, áp dụng Strict Policy & Re-validation trên MySQL** |
+| **Cấu trúc Dữ liệu**       | 1 CSDL đơn lẻ (SQLite hoặc Postgres)       | **Federated Trino: 21 bảng kết hợp PostgreSQL + MySQL**                 |
 
-  * **Triết lý Neuro-Symbolic:**
-    * *Phần Neural (Gemini 2.5 Flash):* Khả năng hiểu ngôn ngữ phong phú, sinh SQL linh hoạt và tổng hợp báo cáo.
-    * *Phần Symbolic (Formal Guardrails):* Thẩm định toán học bằng Cây cú pháp AST, cấm tuyệt đối DDL/DML, ngăn chặn DoS và cưỡng chế phân quyền. Không bao giờ tin tưởng tuyệt đối vào kết quả sinh của AI.
+* **Triết lý Neuro-Symbolic:**
+  * *Phần Neural (Gemini 2.5 Flash):* Khả năng hiểu ngôn ngữ phong phú, sinh SQL linh hoạt và tổng hợp báo cáo.
+  * *Phần Symbolic (Formal Guardrails):* Thẩm định toán học bằng Cây cú pháp AST, cấm tuyệt đối DDL/DML, ngăn chặn DoS và cưỡng chế phân quyền. Không bao giờ tin tưởng tuyệt đối vào kết quả sinh của AI.
 * **Speaker Notes (Lời thoại chi tiết):**
   > "So với bản đề xuất ban đầu ở Tuần 1, nhóm đã có một bước chuyển dịch mang tính bước ngoặt về mặt kiến trúc phần mềm. Ban đầu, nhóm dự kiến dựa vào việc tối ưu hóa Prompt và dùng các biểu thức chính quy (Regex) để bắt lỗi. Nhưng qua thực nghiệm, Regex rất dễ bị vượt qua bởi các kỹ thuật làm mờ mã (Obfuscation). Vì vậy, nhóm đã quyết định chuyển hẳn sang **Kiến trúc Phòng thủ Neuro-Symbolic Đa tầng**. Trong kiến trúc này, chúng ta phân định rạch ròi: LLM chỉ làm nhiệm vụ Neural, tức là hiểu ngôn ngữ và đề xuất kế hoạch truy vấn; còn việc câu lệnh đó có được phép chạm vào database hay không phải do các cổng kiểm soát Symbolic hình thức quyết định. Cụ thể, chúng em dùng bộ phân tích cây cú pháp `sqlglot` để phân tích cấu trúc toán học của câu SQL. Dù kẻ tấn công có Jailbreak được LLM thì câu lệnh sinh ra vẫn bị bẻ gãy 100% tại cổng AST trước khi tới Database."
 
 ---
 
 ### SLIDE 04: TỔNG QUAN KIẾN TRÚC ĐÃ CÀI ĐẶT END-TO-END
+
 * **Thời lượng:** 1.5 phút (Mốc: 04:00 – 05:30)
 * **Tiêu đề Slide:** Kiến Trúc Hệ Thống Microservices & Hạ Tầng 21 Bảng
 * **Nội dung hiển thị trên slide:**
@@ -109,8 +115,8 @@
     * *Backend Gateway:* FastAPI (Python 3.13), SQLAlchemy, Pydantic, REST & NDJSON Streaming.
     * *Tool Gateway:* Trino MCP Server (Stdio JSON-RPC Subprocess).
     * *Federated Data Layer:* Trino Coordinator liên kết 2 nguồn độc lập:
-      * **Catalog `pg` (PostgreSQL 16):** 13 bảng Core ERP / Finance (chứa dữ liệu mật `hr_payroll`, `api_keys_config`, `financial_transactions`).
-      * **Catalog `mysql` (MySQL 8.4):** 8 bảng Customer Portal / Audit / Memory (chứa dữ liệu UGC, `support_tickets`, `agent_query_history`, `semantic_cache`).
+      * **Catalog** `pg` **(PostgreSQL 16):** 13 bảng Core ERP / Finance (chứa dữ liệu mật `hr_payroll`, `api_keys_config`, `financial_transactions`).
+      * **Catalog** `mysql` **(MySQL 8.4):** 8 bảng Customer Portal / Audit / Memory (chứa dữ liệu UGC, `support_tickets`, `agent_query_history`, `semantic_cache`).
   * **Điểm đột phá:** Hỗ trợ Federated Cross-Database JOIN thông qua Trino Coordinator duy nhất, đóng vai trò Cổng kiểm soát dữ liệu tập trung.
 * **Speaker Notes (Lời thoại chi tiết):**
   > "Trên màn hình là kiến trúc tổng thể mà nhóm đã cài đặt và đưa vào vận hành trơn tru end-to-end. Toàn bộ giải pháp được đóng gói dưới dạng các container Docker độc lập. Lớp dữ liệu được thiết kế như một doanh nghiệp thực tế với hai cơ sở dữ liệu chuyên biệt: PostgreSQL đóng vai trò Core ERP gồm 13 bảng lưu trữ đơn hàng, tài chính và nhân sự; MySQL đóng vai trò cổng thông tin khách hàng gồm 8 bảng lưu trữ đánh giá, ticket hỗ trợ và bộ nhớ của Agent. Đứng trước hai database này là Trino Coordinator làm cổng truy vấn liên kết Federated. Ở lớp ứng dụng, Backend FastAPI giao tiếp với Trino thông qua một máy chủ MCP Server chạy ngầm qua giao thức Stdio JSON-RPC. Frontend React được thiết kế theo dạng Split-pane: bên trái là bàn làm việc Red-Teaming, bên phải là bảng điều khiển Observability giám sát từng nhịp xử lý theo thời gian thực."
@@ -118,6 +124,7 @@
 ---
 
 ### SLIDE 05: VÒNG LẶP PHÒNG THỦ 6 BƯỚC & CƠ CHẾ REFLEXION
+
 * **Thời lượng:** 1.5 phút (Mốc: 05:30 – 07:00)
 * **Tiêu đề Slide:** Pipeline 6 Bước & Khả Năng Tự Sửa Lỗi (Reflexion Loop)
 * **Nội dung hiển thị trên slide:**
@@ -138,6 +145,7 @@
 ---
 
 ### SLIDE 06: CHUẨN HÓA MCP & QUẢN TRỊ BỘ NHỚ AN TOÀN
+
 * **Thời lượng:** 1.0 phút (Mốc: 07:00 – 08:00)
 * **Tiêu đề Slide:** Model Context Protocol (MCP) & Cơ Chế Quản Trị Bộ Nhớ
 * **Nội dung hiển thị trên slide:**
@@ -158,6 +166,7 @@
 ---
 
 ### SLIDE 07: MÔ HÌNH MỐI ĐE DỌA V1 (THREAT MODEL V1)
+
 * **Thời lượng:** 1.5 phút (Mốc: 08:00 – 09:30)
 * **Tiêu đề Slide:** Threat Model v1: 6 Vector Tấn Công Trọng Yếu
 * **Nội dung hiển thị trên slide:**
@@ -174,6 +183,7 @@
 ---
 
 ### SLIDE 08: TRÌNH DIỄN RED-TEAMING & MA TRẬN 26 KỊCH BẢN
+
 * **Thời lượng:** 2.0 phút (Mốc: 09:30 – 11:30)
 * **Tiêu đề Slide:** Trình Diễn Red-Teaming: 26 Kịch Bản Thực Nghiệm
 * **Nội dung hiển thị trên slide:**
@@ -193,6 +203,7 @@
 ---
 
 ### SLIDE 09: KẾT QUẢ ĐỊNH LƯỢNG BAN ĐẦU & ĐÁNH GIÁ CHI PHÍ
+
 * **Thời lượng:** 1.5 phút (Mốc: 11:30 – 13:00)
 * **Tiêu đề Slide:** Đánh Giá Định Lượng: Hiệu Năng Bảo Mật & Tối Ưu Chi Phí
 * **Nội dung hiển thị trên slide:**
@@ -206,15 +217,16 @@
 | **End-to-End Latency** | Độ trễ phản hồi trung bình | **1.85 giây** | Thời gian xử lý cho một truy vấn hợp lệ |
 | **Average Cost per Task** | Chi phí API mỗi câu hỏi | **~0.0002 USD** | ~5 VNĐ / truy vấn (Gemini 2.5 Flash) |
 
-  * **Phân tích chi phí & Quản trị rủi ro:**
-    * Tinh gọn Context Window qua Schema Filter giúp giảm 70% lượng token tiêu thụ.
-    * Tích hợp **Fallback LLM Engine**: Tự động chuyển đổi giữa các model khi gặp mã lỗi 429 (ResourceExhausted), đảm bảo tính sẵn sàng 100% với chi phí 0 USD nhờ tận dụng Quota Free Tier.
+* **Phân tích chi phí & Quản trị rủi ro:**
+  * Tinh gọn Context Window qua Schema Filter giúp giảm 70% lượng token tiêu thụ.
+  * Tích hợp **Fallback LLM Engine**: Tự động chuyển đổi giữa các model khi gặp mã lỗi 429 (ResourceExhausted), đảm bảo tính sẵn sàng 100% với chi phí 0 USD nhờ tận dụng Quota Free Tier.
 * **Speaker Notes (Lời thoại chi tiết):**
   > "Nhìn vào bảng số liệu định lượng, hệ thống đạt **Tỷ lệ ngăn chặn tấn công ABR 100%** trên toàn bộ 22 kịch bản đối kháng và **Tỷ lệ vi phạm đặc quyền PER là 0%**. Về mặt hiệu năng nghiệp vụ, việc bổ sung vòng lặp Reflexion đã giúp độ chính xác thực thi (Execution Accuracy) tăng từ 78.5% lên 93.8%, cho thấy khả năng tự sửa lỗi cực kỳ hiệu quả mà không làm giảm tính an toàn. Về mặt chi phí vận hành, nhờ cơ chế Schema Filter chỉ cung cấp đúng các bảng được phép thay vì nạp toàn bộ 21 bảng vào Prompt, lượng token tiêu thụ giảm hơn 70%. Chi phí trung bình cho mỗi truy vấn chỉ rơi vào khoảng 0.0002 USD, tức là chưa tới 5 đồng Việt Nam. Ngoài ra, cơ chế Fallback tự động trượt giữa các dòng mô hình Flash giúp hệ thống duy trì hoạt động liên tục ngay cả khi chạm trần Quota của một model cụ thể."
 
 ---
 
 ### SLIDE 10: KẾ HOẠCH HÀNH ĐỘNG ĐẾN BÁO CÁO CUỐI KỲ (W8–W12)
+
 * **Thời lượng:** 1.0 phút (Mốc: 13:00 – 14:00)
 * **Tiêu đề Slide:** Lộ Trình Hoàn Thiện Đến Buổi Báo Cáo Cuối Kỳ
 * **Nội dung hiển thị trên slide:**
@@ -234,6 +246,7 @@
 ---
 
 ### SLIDE 11: TUYÊN BỐ SỬ DỤNG TRÍ TUỆ NHÂN TẠO (AI-USE STATEMENT)
+
 * **Thời lượng:** 0.5 phút (Mốc: 14:00 – 14:30)
 * **Tiêu đề Slide:** Cam Kết Liêm Chính Học Thuật & Sử Dụng AI Minh Bạch
 * **Nội dung hiển thị trên slide:**
@@ -249,6 +262,7 @@
 ---
 
 ### SLIDE 12: TỔNG KẾT & PHIÊN HỎI ĐÁP (Q&A)
+
 * **Thời lượng:** 0.5 phút (Mốc: 14:30 – 15:00)
 * **Tiêu đề Slide:** Tổng Kết Đề Tài & Lắng Nghe Ý Kiến Hội Đồng
 * **Nội dung hiển thị trên slide:**
