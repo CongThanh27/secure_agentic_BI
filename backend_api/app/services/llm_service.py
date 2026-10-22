@@ -12,6 +12,7 @@ from app.services.prompt_templates import (
     AGENT_SYSTEM_PROMPT_TEMPLATE,
     TAINT_FILTER_SYSTEM_PROMPT,
 )
+from app.services.reflexion import parse_reflected_sql, reflection_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,18 @@ def generate_sql_plan(
         reflexion_feedback=reflexion_feedback,
     )
     return _validate_sql_plan(_decode_json_response(call_gemini_with_fallback(prompt)))
+
+
+def reflect_failed_sql(user_query: str, failed_sql: str, error: str) -> str | None:
+    """Ask the model for a replacement SELECT. Extra JSON keys are ignored."""
+    try:
+        raw_text = call_gemini_with_fallback(
+            reflection_prompt(user_query, failed_sql, error)
+        )
+    except Exception:
+        logger.exception("SQL reflection failed")
+        return None
+    return parse_reflected_sql(raw_text)
 
 
 def synthesize_final_answer(user_query: str, raw_data: str) -> str:

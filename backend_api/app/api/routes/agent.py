@@ -26,6 +26,7 @@ from app.services import (
     sql_validator,
 )
 from app.services.mcp_client import MCPQueryTimeoutError
+from app.services.reflexion import ReflexionTimeout, ReflexionTrace, execute_with_reflexion
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
@@ -57,6 +58,78 @@ def _database_error_message(error: BaseException) -> str:
     if "TrinoUserError" in formatted or "COLUMN_NOT_FOUND" in formatted:
         return formatted
     return str(error) or formatted
+
+
+def _iteration_history(trace: ReflexionTrace):
+    return [
+        ReflexionIteration(
+            attempt_number=attempt.attempt_number,
+            generated_sql=attempt.generated_sql,
+            error_message=attempt.error_message,
+            status=attempt.status,
+        )
+        for attempt in trace.attempts
+    ]
+
+
+async def _run_guarded_reflexion(
+    request: ReflexionChatRequest,
+    filtered_schema: str,
+    permissions,
+    *,
+    timeout_seconds: float,
+    on_step=None,
+) -> ReflexionTrace:
+    """Run the shared Reflexion loop for every SQL endpoint."""
+
+    async def plan(feedback: str | None) -> str:
+        agent_plan = await asyncio.to_thread(
+            llm_service.generate_sql_plan,
+            request.query,
+            filtered_schema,
+            feedback,
+        )
+        try:
+            generated_sql = agent_plan["tool_call"]["arguments"]["query"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("LLM returned no executable SQL") from exc
+        if not isinstance(generated_sql, str):
+            raise ValueError("LLM returned a non-string SQL query")
+        return generated_sql
+
+    async def validate(sql: str) -> tuple[bool, str]:
+        return await asyncio.to_thread(
+            sql_validator.validate_sql_ast,
+            sql,
+            permissions,
+        )
+
+    async def execute(sql: str):
+        try:
+            return await mcp_client.execute_sql_with_timeout(sql, timeout_seconds)
+        except (MCPQueryTimeoutError, asyncio.TimeoutError) as exc:
+            elapsed = exc.elapsed_seconds if isinstance(exc, MCPQueryTimeoutError) else 0.0
+            raise ReflexionTimeout(str(exc), elapsed) from exc
+        except Exception as exc:
+            raise RuntimeError(_database_error_message(exc)) from exc
+
+    async def reflect(sql: str, error: str) -> str | None:
+        return await asyncio.to_thread(
+            llm_service.reflect_failed_sql,
+            request.query,
+            sql,
+            error,
+        )
+
+    return await execute_with_reflexion(
+        request.query,
+        plan=plan,
+        validate=validate,
+        execute=execute,
+        reflect=reflect,
+        max_iterations=request.max_iterations,
+        on_step=on_step,
+    )
 
 
 @router.post(
@@ -169,115 +242,19 @@ async def process_agent_query_reflexion(
             detail="Metadata discovery service is unavailable",
         ) from exc
 
-    iteration_history: list[ReflexionIteration] = []
-    error_feedback: str | None = None
-    final_data = None
-    final_status = "failed_after_max_iterations"
-
-    for attempt_number in range(1, request.max_iterations + 1):
-        logger.info(
-            "[Reflexion] Attempt %s/%s started",
-            attempt_number,
-            request.max_iterations,
-        )
-        generated_sql = ""
-
-        try:
-            agent_plan = await asyncio.to_thread(
-                llm_service.generate_sql_plan,
-                request.query,
-                filtered_schema,
-                error_feedback,
-            )
-            generated_sql = agent_plan["tool_call"]["arguments"]["query"]
-            if not isinstance(generated_sql, str):
-                raise ValueError("LLM returned a non-string SQL query")
-        except (KeyError, TypeError, RuntimeError, ValueError) as exc:
-            error_feedback = f"LLM planning error: {exc}"
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=error_feedback,
-                    status="error_llm",
-                )
-            )
-            logger.warning(
-                "[Reflexion] Attempt %s/%s failed at LLM: %s",
-                attempt_number,
-                request.max_iterations,
-                exc,
-            )
-            continue
-
-        is_valid, ast_reason = await asyncio.to_thread(
-            sql_validator.validate_sql_ast,
-            generated_sql,
-            permissions,
-        )
-        if not is_valid:
-            error_feedback = ast_reason
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=ast_reason,
-                    status="error_ast",
-                )
-            )
-            logger.warning(
-                "[Reflexion] Attempt %s/%s failed at AST: %s",
-                attempt_number,
-                request.max_iterations,
-                ast_reason,
-            )
-            continue
-
-        try:
-            final_data = await mcp_client.execute_trino_query(
-                generated_sql, timeout_seconds=10.0
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            error_feedback = f"Trino engine error: {exc}"
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=error_feedback,
-                    status="error_engine",
-                )
-            )
-            logger.warning(
-                "[Reflexion] Attempt %s/%s failed at Trino: %s",
-                attempt_number,
-                request.max_iterations,
-                exc,
-            )
-            continue
-
-        iteration_history.append(
-            ReflexionIteration(
-                attempt_number=attempt_number,
-                generated_sql=generated_sql,
-                error_message="",
-                status="success",
-            )
-        )
-        final_status = "success"
-        logger.info(
-            "[Reflexion] Attempt %s/%s succeeded",
-            attempt_number,
-            request.max_iterations,
-        )
-        break
-
+    trace = await _run_guarded_reflexion(
+        request,
+        filtered_schema,
+        permissions,
+        timeout_seconds=10.0,
+    )
     return ReflexionChatResponse(
         query=request.query,
         role=request.role,
-        status=final_status,
-        total_iterations_used=len(iteration_history),
-        iteration_history=iteration_history,
-        final_data=final_data,
+        status=trace.status,
+        total_iterations_used=len(trace.attempts),
+        iteration_history=_iteration_history(trace),
+        final_data=trace.data if trace.status == "success" else None,
     )
 
 
@@ -316,149 +293,25 @@ async def process_secure_pipeline(
             detail="Metadata discovery service is unavailable",
         ) from exc
 
-    iteration_history: list[ReflexionIteration] = []
-    error_feedback: str | None = None
-    raw_data = None
-    execution_time_seconds = 0.0
-
-    for attempt_number in range(1, request.max_iterations + 1):
-        logger.info(
-            "[SecurePipeline] Attempt %s/%s started",
-            attempt_number,
-            request.max_iterations,
-        )
-        generated_sql = ""
-        try:
-            agent_plan = await asyncio.to_thread(
-                llm_service.generate_sql_plan,
-                request.query,
-                filtered_schema,
-                error_feedback,
-            )
-            generated_sql = agent_plan["tool_call"]["arguments"]["query"]
-            if not isinstance(generated_sql, str):
-                raise ValueError("LLM returned a non-string SQL query")
-        except (KeyError, TypeError, RuntimeError, ValueError) as exc:
-            error_feedback = f"LLM planning error: {exc}"
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=error_feedback,
-                    status="error_llm",
-                )
-            )
-            logger.warning(
-                "[SecurePipeline] Attempt %s/%s failed at LLM: %s",
-                attempt_number,
-                request.max_iterations,
-                exc,
-            )
-            continue
-
-        is_valid, ast_reason = await asyncio.to_thread(
-            sql_validator.validate_sql_ast,
-            generated_sql,
-            permissions,
-        )
-        if not is_valid:
-            error_feedback = ast_reason
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=ast_reason,
-                    status="error_ast",
-                )
-            )
-            logger.warning(
-                "[SecurePipeline] Attempt %s/%s failed at AST: %s",
-                attempt_number,
-                request.max_iterations,
-                ast_reason,
-            )
-            continue
-
-        try:
-            raw_data, execution_time_seconds = (
-                await mcp_client.execute_sql_with_timeout(
-                    generated_sql, request.timeout_seconds
-                )
-            )
-        except (MCPQueryTimeoutError, asyncio.TimeoutError) as exc:
-            message = str(exc)
-            if isinstance(exc, MCPQueryTimeoutError):
-                execution_time_seconds = exc.elapsed_seconds
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=message,
-                    status="circuit_breaker_timeout",
-                )
-            )
-            logger.warning(
-                "[SecurePipeline] Attempt %s/%s stopped by circuit breaker: %s",
-                attempt_number,
-                request.max_iterations,
-                exc,
-            )
-            return SecurePipelineResponse(
-                status="circuit_breaker_timeout",
-                total_iterations_used=len(iteration_history),
-                execution_time_seconds=execution_time_seconds,
-                iteration_history=iteration_history,
-                raw_data=None,
-                final_answer="",
-            )
-        except Exception as exc:
-            error_msg = _database_error_message(exc)
-            error_feedback = (
-                "Lỗi thực thi từ Database: "
-                f"{error_msg}. Hãy kiểm tra lại TÊN CỘT và CÚ PHÁP."
-            )
-            iteration_history.append(
-                ReflexionIteration(
-                    attempt_number=attempt_number,
-                    generated_sql=generated_sql,
-                    error_message=error_feedback,
-                    status="error_engine",
-                )
-            )
-            logger.warning(
-                "[SecurePipeline] Attempt %s/%s failed at Trino: %s",
-                attempt_number,
-                request.max_iterations,
-                exc,
-            )
-            continue
-
-        iteration_history.append(
-            ReflexionIteration(
-                attempt_number=attempt_number,
-                generated_sql=generated_sql,
-                error_message="",
-                status="success",
-            )
-        )
-        logger.info(
-            "[SecurePipeline] Attempt %s/%s succeeded",
-            attempt_number,
-            request.max_iterations,
-        )
-        break
-    else:
+    trace = await _run_guarded_reflexion(
+        request,
+        filtered_schema,
+        permissions,
+        timeout_seconds=request.timeout_seconds,
+    )
+    history = _iteration_history(trace)
+    if trace.status != "success":
         return SecurePipelineResponse(
-            status="failed_after_max_iterations",
-            total_iterations_used=len(iteration_history),
-            execution_time_seconds=execution_time_seconds,
-            iteration_history=iteration_history,
+            status=trace.status,
+            total_iterations_used=len(history),
+            execution_time_seconds=trace.execution_time_seconds,
+            iteration_history=history,
             raw_data=None,
             final_answer="",
         )
 
     try:
-        serialized_data = json.dumps(raw_data, ensure_ascii=False, default=str)
+        serialized_data = json.dumps(trace.data, ensure_ascii=False, default=str)
         final_answer = await asyncio.to_thread(
             llm_service.synthesize_final_answer,
             request.query,
@@ -472,10 +325,10 @@ async def process_secure_pipeline(
 
     return SecurePipelineResponse(
         status="success",
-        total_iterations_used=len(iteration_history),
-        execution_time_seconds=execution_time_seconds,
-        iteration_history=iteration_history,
-        raw_data=raw_data,
+        total_iterations_used=len(history),
+        execution_time_seconds=trace.execution_time_seconds,
+        iteration_history=history,
+        raw_data=trace.data,
         final_answer=final_answer,
     )
 
@@ -520,199 +373,89 @@ async def process_agent_query_stream(
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeError("Metadata discovery service is unavailable") from exc
 
-            iteration_history: list[ReflexionIteration] = []
-            error_feedback: str | None = None
-            raw_data = None
-            execution_time_seconds = 0.0
+            queue: asyncio.Queue = asyncio.Queue()
 
-            for attempt_number in range(1, request.max_iterations + 1):
-                async for item in emit(
-                    "🧠 Đang gọi LLM để sinh kế hoạch SQL "
-                    f"(Reflexion lần {attempt_number}/{request.max_iterations})...",
-                    attempt_number=attempt_number,
-                ):
-                    yield item
-                generated_sql = ""
+            async def on_step(message: str, attempt_number: int) -> None:
+                await queue.put(
+                    {
+                        "type": "step",
+                        "message": message,
+                        "attempt_number": attempt_number,
+                    }
+                )
+                await asyncio.sleep(0)
+
+            async def runner() -> None:
                 try:
-                    agent_plan = await asyncio.to_thread(
-                        llm_service.generate_sql_plan,
-                        request.query,
+                    trace = await _run_guarded_reflexion(
+                        request,
                         filtered_schema,
-                        error_feedback,
+                        permissions,
+                        timeout_seconds=request.timeout_seconds,
+                        on_step=on_step,
                     )
-                    generated_sql = agent_plan["tool_call"]["arguments"]["query"]
-                    if not isinstance(generated_sql, str):
-                        raise ValueError("LLM returned a non-string SQL query")
-                except (KeyError, TypeError, RuntimeError, ValueError) as exc:
-                    error_feedback = f"LLM planning error: {exc}"
-                    message = f"LLM không tạo được SQL: {error_feedback}"
-                    iteration_history.append(
-                        ReflexionIteration(
-                            attempt_number=attempt_number,
-                            generated_sql=generated_sql,
-                            error_message=error_feedback,
-                            status="error_llm",
-                        )
-                    )
-                    logger.warning("[StreamPipeline] %s", message)
-                    async for item in emit(
-                        f"⚠️ {message}. Đang thử lại...",
-                        attempt_number=attempt_number,
-                    ):
-                        yield item
-                    continue
+                    history = _iteration_history(trace)
+                    if trace.status != "success":
+                        payload = SecurePipelineResponse(
+                            status=trace.status,
+                            total_iterations_used=len(history),
+                            execution_time_seconds=trace.execution_time_seconds,
+                            iteration_history=history,
+                            raw_data=None,
+                            final_answer="",
+                        ).model_dump()
+                        await queue.put({"type": "final_result", "data": payload})
+                        return
 
-                async for item in emit(
-                    "🛡️ Đang kiểm tra an toàn AST Parser...",
-                    attempt_number=attempt_number,
-                ):
-                    yield item
-                is_valid, ast_reason = await asyncio.to_thread(
-                    sql_validator.validate_sql_ast,
-                    generated_sql,
-                    permissions,
-                )
-                if not is_valid:
-                    error_feedback = ast_reason
-                    iteration_history.append(
-                        ReflexionIteration(
-                            attempt_number=attempt_number,
-                            generated_sql=generated_sql,
-                            error_message=ast_reason,
-                            status="error_ast",
+                    await queue.put(
+                        {
+                            "type": "step",
+                            "message": "🧼 Đang áp dụng Taint Filter và tổng hợp câu trả lời...",
+                        }
+                    )
+                    serialized_data = json.dumps(
+                        trace.data, ensure_ascii=False, default=str
+                    )
+                    try:
+                        final_answer = await asyncio.to_thread(
+                            llm_service.synthesize_final_answer,
+                            request.query,
+                            serialized_data,
                         )
-                    )
-                    logger.warning(
-                        "[StreamPipeline] Attempt %s blocked by AST: %s",
-                        attempt_number,
-                        ast_reason,
-                    )
-                    async for item in emit(
-                        f"🚫 AST đã chặn truy vấn: {ast_reason}. "
-                        f"Đang tự phản ngẫm (lần {attempt_number})...",
-                        attempt_number=attempt_number,
-                    ):
-                        yield item
-                    continue
-
-                async for item in emit(
-                    "🔌 Đang gọi Trino MCP "
-                    "(execute_query_read_only)...",
-                    attempt_number=attempt_number,
-                ):
-                    yield item
-                try:
-                    raw_data, execution_time_seconds = (
-                        await mcp_client.execute_sql_with_timeout(
-                            generated_sql, request.timeout_seconds
+                    except (RuntimeError, ValueError):
+                        logger.exception("Result synthesis failed")
+                        await queue.put(
+                            {
+                                "type": "error",
+                                "message": "Result synthesis service is unavailable",
+                            }
                         )
-                    )
-                except (MCPQueryTimeoutError, asyncio.TimeoutError) as exc:
-                    message = str(exc)
-                    if isinstance(exc, MCPQueryTimeoutError):
-                        execution_time_seconds = exc.elapsed_seconds
-                    iteration_history.append(
-                        ReflexionIteration(
-                            attempt_number=attempt_number,
-                            generated_sql=generated_sql,
-                            error_message=message,
-                            status="circuit_breaker_timeout",
-                        )
-                    )
-                    async for item in emit(
-                        f"⏱️ Circuit Breaker dừng truy vấn: {message}",
-                        attempt_number=attempt_number,
-                    ):
-                        yield item
+                        return
                     payload = SecurePipelineResponse(
-                        status="circuit_breaker_timeout",
-                        total_iterations_used=len(iteration_history),
-                        execution_time_seconds=execution_time_seconds,
-                        iteration_history=iteration_history,
-                        raw_data=None,
-                        final_answer="",
-                    ).model_dump()
-                    yield json.dumps(
-                        {"type": "final_result", "data": payload},
-                        ensure_ascii=False,
-                        default=str,
-                    ) + "\n"
-                    return
-                except Exception as exc:
-                    error_msg = _database_error_message(exc)
-                    error_feedback = (
-                        "Lỗi thực thi từ Database: "
-                        f"{error_msg}. Hãy kiểm tra lại TÊN CỘT và CÚ PHÁP."
-                    )
-                    iteration_history.append(
-                        ReflexionIteration(
-                            attempt_number=attempt_number,
-                            generated_sql=generated_sql,
-                            error_message=error_feedback,
-                            status="error_engine",
-                        )
-                    )
-                    logger.warning(
-                        "[StreamPipeline] Attempt %s failed at Trino: %s",
-                        attempt_number,
-                        error_msg,
-                    )
-                    async for item in emit(
-                        f"🔄 Trino báo lỗi, đang tự phản ngẫm "
-                        f"(Reflexion lần {attempt_number}): {error_msg}",
-                        attempt_number=attempt_number,
-                    ):
-                        yield item
-                    continue
-
-                iteration_history.append(
-                    ReflexionIteration(
-                        attempt_number=attempt_number,
-                        generated_sql=generated_sql,
-                        error_message="",
                         status="success",
-                    )
-                )
-                async for item in emit("✅ Trino thực thi thành công.", attempt_number=attempt_number):
-                    yield item
-                break
-            else:
-                payload = SecurePipelineResponse(
-                    status="failed_after_max_iterations",
-                    total_iterations_used=len(iteration_history),
-                    execution_time_seconds=execution_time_seconds,
-                    iteration_history=iteration_history,
-                    raw_data=None,
-                    final_answer="",
-                ).model_dump()
-                yield json.dumps(
-                    {"type": "final_result", "data": payload},
-                    ensure_ascii=False,
-                    default=str,
-                ) + "\n"
-                return
+                        total_iterations_used=len(history),
+                        execution_time_seconds=trace.execution_time_seconds,
+                        iteration_history=history,
+                        raw_data=trace.data,
+                        final_answer=final_answer,
+                    ).model_dump()
+                    await queue.put({"type": "final_result", "data": payload})
+                except Exception as exc:
+                    logger.exception("Streaming secure pipeline failed")
+                    await queue.put({"type": "error", "message": str(exc)})
+                finally:
+                    await queue.put(None)
 
-            async for item in emit("🧼 Đang áp dụng Taint Filter và tổng hợp câu trả lời..."):
-                yield item
-            serialized_data = json.dumps(raw_data, ensure_ascii=False, default=str)
-            final_answer = await asyncio.to_thread(
-                llm_service.synthesize_final_answer,
-                request.query,
-                serialized_data,
-            )
-            payload = SecurePipelineResponse(
-                status="success",
-                total_iterations_used=len(iteration_history),
-                execution_time_seconds=execution_time_seconds,
-                iteration_history=iteration_history,
-                raw_data=raw_data,
-                final_answer=final_answer,
-            ).model_dump()
-            yield json.dumps(
-                {"type": "final_result", "data": payload},
-                ensure_ascii=False,
-                default=str,
-            ) + "\n"
+            task = asyncio.create_task(runner())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
+                    await asyncio.sleep(0.1)
+            finally:
+                await task
         except HTTPException as exc:
             yield json.dumps(
                 {"type": "error", "message": str(exc.detail)},

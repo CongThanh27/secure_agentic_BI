@@ -88,8 +88,9 @@ flowchart TD
         S2["Bước 2: Schema Filter<br/>(Context Injection & Allow-list)"]
         S3["Bước 3: Neural ReAct Planner<br/>(Google Gemini 2.5 Flash)"]
         S4["Bước 4: AST Guardrail<br/>(sqlglot Trino Dialect)"]
-        S5["Bước 5: Reflexion Engine<br/>(Self-Correction Loop <= 3)"]
+        S5["Bước 5: Reflexion Engine<br/>(Chỉ sửa lỗi kỹ thuật, tối đa 3 lần)"]
         CB["Circuit Breaker<br/>(Timeout 3-10s & Semaphore)"]
+        Stop["Dừng ngay<br/>(aborted / circuit_breaker_timeout)"]
         S6["Bước 6: Taint Filter & Synthesizer<br/>(Passive Text Isolation)"]
     end
 
@@ -106,14 +107,16 @@ flowchart TD
 
     UI -->|Gửi Prompt + Role| Router
     Router --> S1 --> S2 --> S3 --> S4
-    S4 -->|Vi phạm AST| S5
-    S5 -->|Phản hồi lỗi chi tiết| S3
+    S4 -->|Lỗi parse hoặc JOIN thiếu ON| S5
+    S4 -->|Vi phạm quyền, DDL/DML, không phải SELECT| Stop
+    S5 -->|Chỉ thay câu SQL, rồi kiểm tra lại| S4
     S4 -->|Hợp lệ| MCP
     MCP --> CB --> Trino
+    CB -->|Timeout| Stop
     Trino -->|Federated Query| PG
     Trino -->|Federated Query| MySQL
-    Trino -->|Dữ liệu thô / Timeout| S5
-    S5 -->|Thành công| S6
+    Trino -->|Sai cột, bảng hoặc cú pháp| S5
+    Trino -->|Dữ liệu thô| S6
     S6 -->|Safe Answer Markdown| LiveTrace
 ```
 
@@ -128,7 +131,7 @@ flowchart TD
    * Phát triển trên nền tảng **FastAPI (Python 3.13)** bất đồng bộ (`asyncio`), kết hợp SQLAlchemy ORM và Pydantic v2.
    * Cung cấp các endpoint chuyên biệt phục vụ cả nghiên cứu Ablation Study lẫn ứng dụng thực tế:
      * `POST /api/v1/agent/query`: Baseline API chỉ áp dụng kiểm tra AST một lượt, không có vòng lặp sửa lỗi.
-     * `POST /api/v1/agent/query_reflexion`: API tích hợp vòng lặp tự sửa lỗi Reflexion giữa AST và Trino Engine.
+     * `POST /api/v1/agent/query_reflexion`: API tự sửa lỗi cột, bảng và cú pháp. Lỗi quyền và timeout thì dừng.
      * `POST /api/v1/agent/query_secure_pipeline`: API phòng thủ toàn diện tích hợp thêm Circuit Breaker và Taint Filter.
      * `POST /api/v1/agent/query_stream`: API Stream NDJSON phục vụ hiển thị trực quan các bước xử lý trên giao diện.
 3. **Trino MCP Server (`mcp_servers/trino-mcp/`):**
@@ -146,10 +149,10 @@ Khi người dùng gửi một yêu cầu ngôn ngữ tự nhiên từ giao di�
 * **Bước 1 (RBAC Policy Lookup):** Hệ thống truy vấn bảng `agent_role_permissions` trên MySQL để trích xuất quyền hạn của vai trò hiện tại (ví dụ: `analyst` chỉ được truy cập các catalog và bảng nghiệp vụ thông thường, bị cấm tuyệt đối truy cập `hr_payroll`, `api_keys_config`, `financial_transactions`, `can_export_file = FALSE`, `max_row_limit = 5000`).
 * **Bước 2 (Schema Discovery & RBAC Context Injection):** Thay vì nạp toàn bộ 21 bảng vào LLM gây lãng phí token và rò rỉ cấu trúc, hệ thống gọi tool metadata từ Trino MCP, sau đó dùng `schema_filter.py` lọc sạch các bảng thuộc danh sách cấm (`denied_tables`). LLM chỉ nhận được cấu trúc schema của đúng các bảng mà người dùng được phép biết.
 * **Bước 3 (Neural ReAct SQL Planning):** Gemini 2.5 Flash nhận câu hỏi người dùng cùng filtered schema, thực hiện suy luận (Chain-of-Thought) và sinh ra JSON kế hoạch gọi tool `execute_query_read_only` với tham số `query` chứa câu lệnh SQL dạng chuẩn Trino.
-* **Bước 4 (Symbolic AST Guardrail Enforcement):** Trước khi câu lệnh SQL rời khỏi Backend để tới Trino, nó bị chặn lại tại `sql_validator.py`. Trình phân tích `sqlglot` kiểm tra: (1) Cấm đa lệnh (chấm phẩy); (2) Bắt buộc là `SELECT`; (3) Không chứa các node DDL/DML; (4) Không chứa CTE đệ quy; (5) Không chứa `CROSS JOIN` hoặc `JOIN` thiếu điều kiện; (6) Mọi bảng được tham chiếu phải nằm trong danh mục cho phép của Role. Nếu vi phạm, câu lệnh bị từ chối ngay lập tức tại cổng Gateway.
+* **Bước 4 (Symbolic AST Guardrail Enforcement):** Trước khi câu lệnh SQL rời khỏi Backend để tới Trino, nó bị chặn lại tại `sql_validator.py`. Trình phân tích `sqlglot` kiểm tra: (1) Cấm đa lệnh (chấm phẩy); (2) Bắt buộc là `SELECT`; (3) Không chứa các node DDL/DML; (4) Không chứa CTE đệ quy; (5) Không chứa `CROSS JOIN`; (6) Mọi bảng được tham chiếu phải nằm trong danh mục cho phép của Role. Các vi phạm này bị từ chối ngay, trạng thái `aborted`, và không được đưa cho LLM sửa. Chỉ lỗi parse và `JOIN` thiếu điều kiện `ON`/`USING` được chuyển sang Bước 5.
 * **Bước 5 (Execution via Trino MCP + Reflexion Self-Correction + Circuit Breaker):**
-  * Nếu AST kiểm tra thất bại hoặc Trino báo lỗi cú pháp/sai tên cột, thông tin lỗi chi tiết được chuyển thành phản hồi `REFLEXION FEEDBACK` gửi ngược lại cho LLM. LLM tự phản tư và sinh lại câu lệnh đã sửa chữa (tối đa `max_iterations = 3`).
-  * Nếu câu lệnh hợp lệ, MCP Client thực thi truy vấn kèm bộ ngắt mạch **Circuit Breaker** (giới hạn thời gian tối đa 3-10 giây). Nếu truy vấn vượt ngưỡng thời gian quy định (do tính toán quá tải hoặc quét bảng khổng lồ), hệ thống lập tức hủy tiến trình và trả về trạng thái `circuit_breaker_timeout`.
+  * Reflexion chỉ sửa lỗi kỹ thuật: lỗi parse AST, `JOIN` thiếu `ON`/`USING`, hoặc Trino báo sai cột, sai bảng, sai schema, sai catalog, sai cú pháp. LLM nhận một prompt sửa SQL riêng, giữ nguyên câu hỏi của người dùng, không được đổi bảng để đọc dữ liệu bị từ chối, và chỉ được trả field `query`. Câu SQL mới phải đi qua AST một lần nữa trước khi chạy. Số lần thử tối đa là `max_iterations = 3`. Lỗi quyền, câu không read-only, timeout và lỗi không xác định thì dừng, không gọi LLM sửa.
+  * Nếu câu lệnh hợp lệ, MCP Client thực thi truy vấn kèm bộ ngắt mạch **Circuit Breaker** (giới hạn thời gian tối đa 3-10 giây). Nếu truy vấn vượt ngưỡng thời gian quy định (do tính toán quá tải hoặc quét bảng khổng lồ), hệ thống lập tức hủy tiến trình, trả về trạng thái `circuit_breaker_timeout`, và không đưa timeout vào vòng Reflexion.
 * **Bước 6 (Table Content Taint Filter & Safe Synthesis):** Dữ liệu trả về từ Trino được chuyển tiếp tới tầng tổng hợp. Prompt template `TAINT_FILTER_SYSTEM_PROMPT` đóng băng toàn bộ nội dung dữ liệu thành *Passive Text*. Mô hình LLM tổng hợp câu trả lời báo cáo kết quả nghiệp vụ hoặc cảnh báo phát hiện dữ liệu bất thường cho người dùng mà không bao giờ thực thi bất kỳ chuỗi chỉ thị nguy hiểm nào được giấu bên trong các dòng dữ liệu.
 
 ---

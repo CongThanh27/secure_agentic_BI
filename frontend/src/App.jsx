@@ -48,7 +48,8 @@ function MermaidDiagram() {
         API --> RBAC[RBAC + Schema Filter]
         RBAC --> LLM[Gemini SQL Planner]
         LLM --> AST[SQL AST Guardrail]
-        AST -->|blocked| REF[Reflexion Feedback]
+        AST -->|technical error| REF[Reflexion]
+        AST -->|security denial| STOP[Stop]
         REF --> LLM
         AST -->|passed| MCP[Trino MCP]
         MCP --> TAINT[Taint Filter]
@@ -267,7 +268,7 @@ function Theory() {
     ['02', 'Metadata Discovery', 'Trino metadata is grouped by table and denied objects are removed before reaching the model.'],
     ['03', 'ReAct Neural Phase', 'Gemini reasons over the constrained context and emits a read-only SQL plan.'],
     ['04', 'AST Guardrail', 'sqlglot blocks DML/DDL, recursive CTEs, unsafe joins, and out-of-scope tables.'],
-    ['05', 'Reflexion Loop', 'AST or database errors become feedback so the agent can repair SQL within a fixed budget.'],
+    ['05', 'Reflexion Loop', 'Column, table, and syntax errors become feedback. Permission denials and timeouts stop the loop.'],
     ['06', 'Taint Filter', 'Database rows remain passive text; suspicious instructions are reported, never executed.'],
   ]
   return <div className="theory-panel"><MermaidDiagram /><div className="section-title"><span>DEFENSE LAYERS</span><span className="count-chip">6 STEPS</span></div><div className="theory-grid">{steps.map(([number, title, body]) => <article key={number}><span className="step-number">{number}</span><div><h3>{title}</h3><p>{body}</p></div></article>)}</div></div>
@@ -276,7 +277,7 @@ function Theory() {
 function Comparison() {
   return <div className="comparison-panel"><div className="section-title"><span>API EVOLUTION</span><span className="count-chip">SECURITY POSTURE</span></div><div className="comparison-table"><div className="comparison-row comparison-head"><span>ENDPOINT</span><span>CONTROLS</span><span>BEHAVIOR</span></div>{[
     ['/query', 'AST Guardrail', 'Blocks unsafe SQL; no repair loop'],
-    ['/query_reflexion', 'AST + Reflexion', 'Repairs AST and Trino errors'],
+    ['/query_reflexion', 'AST + Reflexion', 'Repairs column, table, and syntax errors. Security denials stop the loop'],
     ['/query_secure_pipeline', 'AST + Reflexion + Circuit Breaker + Taint Filter', 'Complete secure execution pipeline'],
   ].map(([endpoint, controls, behavior]) => <div className="comparison-row" key={endpoint}><code>{endpoint}</code><span>{controls}</span><span>{behavior}</span></div>)}</div></div>
 }
