@@ -44,6 +44,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+fallback-version = "0.2.8"
+
+[tool.hatch.version.raw-options]
+# This package lives inside the monorepo, not its own git root.
+search_parent_directories = true
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/trino_mcp/_version.py"

@@ -3,11 +3,12 @@ import json
 import logging
 import traceback
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.database import get_db
 from app.schemas.chat import (
     ChatRequest,
@@ -25,10 +26,57 @@ from app.services import (
     schema_filter,
     sql_validator,
 )
+from app.services.llm_service import (
+    LLMNonRetryableError,
+    LLMTimeoutError,
+    is_non_retryable_llm_error,
+)
 from app.services.mcp_client import MCPQueryTimeoutError
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
+
+
+def _llm_timeout_budget() -> float:
+    """Outer asyncio budget: per-model timeout times unique model count."""
+    per_call = max(1.0, float(settings.llm_timeout_seconds))
+    unique_models = len({m for m in settings.available_models if m}) or 1
+    return per_call * unique_models
+
+
+async def _generate_sql_plan_async(
+    user_query: str,
+    filtered_schema: str,
+    error_feedback: str | None = None,
+) -> dict:
+    """Call Gemini planning with an asyncio-level timeout guard."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            llm_service.generate_sql_plan,
+            user_query,
+            filtered_schema,
+            error_feedback,
+        ),
+        timeout=_llm_timeout_budget(),
+    )
+
+
+async def _synthesize_final_answer_async(user_query: str, serialized_data: str) -> str:
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            llm_service.synthesize_final_answer,
+            user_query,
+            serialized_data,
+        ),
+        timeout=_llm_timeout_budget(),
+    )
+
+
+def _is_fatal_llm_failure(exc: BaseException) -> bool:
+    return isinstance(
+        exc,
+        (LLMNonRetryableError, LLMTimeoutError, asyncio.TimeoutError),
+    ) or is_non_retryable_llm_error(exc)
 
 
 async def _stream_event(event: dict[str, object]):
@@ -94,11 +142,12 @@ async def process_agent_query(
         ) from exc
 
     try:
-        agent_plan = await asyncio.to_thread(
-            llm_service.generate_sql_plan,
-            request.query,
-            filtered_schema,
-        )
+        agent_plan = await _generate_sql_plan_async(request.query, filtered_schema)
+    except (LLMNonRetryableError, LLMTimeoutError, asyncio.TimeoutError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Neural SQL planning service unavailable: {exc}",
+        ) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -183,8 +232,7 @@ async def process_agent_query_reflexion(
         generated_sql = ""
 
         try:
-            agent_plan = await asyncio.to_thread(
-                llm_service.generate_sql_plan,
+            agent_plan = await _generate_sql_plan_async(
                 request.query,
                 filtered_schema,
                 error_feedback,
@@ -192,7 +240,7 @@ async def process_agent_query_reflexion(
             generated_sql = agent_plan["tool_call"]["arguments"]["query"]
             if not isinstance(generated_sql, str):
                 raise ValueError("LLM returned a non-string SQL query")
-        except (KeyError, TypeError, RuntimeError, ValueError) as exc:
+        except (KeyError, TypeError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
             error_feedback = f"LLM planning error: {exc}"
             iteration_history.append(
                 ReflexionIteration(
@@ -208,6 +256,11 @@ async def process_agent_query_reflexion(
                 request.max_iterations,
                 exc,
             )
+            if _is_fatal_llm_failure(exc):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Neural SQL planning service unavailable: {exc}",
+                ) from exc
             continue
 
         is_valid, ast_reason = await asyncio.to_thread(
@@ -329,8 +382,7 @@ async def process_secure_pipeline(
         )
         generated_sql = ""
         try:
-            agent_plan = await asyncio.to_thread(
-                llm_service.generate_sql_plan,
+            agent_plan = await _generate_sql_plan_async(
                 request.query,
                 filtered_schema,
                 error_feedback,
@@ -338,7 +390,7 @@ async def process_secure_pipeline(
             generated_sql = agent_plan["tool_call"]["arguments"]["query"]
             if not isinstance(generated_sql, str):
                 raise ValueError("LLM returned a non-string SQL query")
-        except (KeyError, TypeError, RuntimeError, ValueError) as exc:
+        except (KeyError, TypeError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
             error_feedback = f"LLM planning error: {exc}"
             iteration_history.append(
                 ReflexionIteration(
@@ -354,6 +406,11 @@ async def process_secure_pipeline(
                 request.max_iterations,
                 exc,
             )
+            if _is_fatal_llm_failure(exc):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Neural SQL planning service unavailable: {exc}",
+                ) from exc
             continue
 
         is_valid, ast_reason = await asyncio.to_thread(
@@ -459,11 +516,15 @@ async def process_secure_pipeline(
 
     try:
         serialized_data = json.dumps(raw_data, ensure_ascii=False, default=str)
-        final_answer = await asyncio.to_thread(
-            llm_service.synthesize_final_answer,
+        final_answer = await _synthesize_final_answer_async(
             request.query,
             serialized_data,
         )
+    except (LLMNonRetryableError, LLMTimeoutError, asyncio.TimeoutError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Result synthesis service unavailable: {exc}",
+        ) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -486,6 +547,7 @@ async def process_secure_pipeline(
 )
 async def process_agent_query_stream(
     request: SecurePipelineRequest,
+    http_request: Request,
     db_session: Session = Depends(get_db),
 ) -> StreamingResponse:
     """Stream observable secure-pipeline progress as newline-delimited JSON."""
@@ -496,7 +558,22 @@ async def process_agent_query_stream(
             yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
             await asyncio.sleep(0.1)
 
+        async def ensure_client_connected() -> bool:
+            if await http_request.is_disconnected():
+                logger.info("[StreamPipeline] Client disconnected; aborting pipeline")
+                return False
+            return True
+
+        async def emit_error(message: str):
+            yield json.dumps(
+                {"type": "error", "message": message},
+                ensure_ascii=False,
+            ) + "\n"
+
         try:
+            if not await ensure_client_connected():
+                return
+
             async for item in emit("🔐 Đang xác thực role và tải chính sách RBAC..."):
                 yield item
             try:
@@ -507,6 +584,9 @@ async def process_agent_query_stream(
                 raise
             except SQLAlchemyError as exc:
                 raise RuntimeError("RBAC policy service is unavailable") from exc
+
+            if not await ensure_client_connected():
+                return
 
             async for item in emit("🧭 Đang khám phá metadata và lọc schema theo RBAC..."):
                 yield item
@@ -526,6 +606,9 @@ async def process_agent_query_stream(
             execution_time_seconds = 0.0
 
             for attempt_number in range(1, request.max_iterations + 1):
+                if not await ensure_client_connected():
+                    return
+
                 async for item in emit(
                     "🧠 Đang gọi LLM để sinh kế hoạch SQL "
                     f"(Reflexion lần {attempt_number}/{request.max_iterations})...",
@@ -534,8 +617,7 @@ async def process_agent_query_stream(
                     yield item
                 generated_sql = ""
                 try:
-                    agent_plan = await asyncio.to_thread(
-                        llm_service.generate_sql_plan,
+                    agent_plan = await _generate_sql_plan_async(
                         request.query,
                         filtered_schema,
                         error_feedback,
@@ -543,7 +625,13 @@ async def process_agent_query_stream(
                     generated_sql = agent_plan["tool_call"]["arguments"]["query"]
                     if not isinstance(generated_sql, str):
                         raise ValueError("LLM returned a non-string SQL query")
-                except (KeyError, TypeError, RuntimeError, ValueError) as exc:
+                except (
+                    KeyError,
+                    TypeError,
+                    RuntimeError,
+                    ValueError,
+                    asyncio.TimeoutError,
+                ) as exc:
                     error_feedback = f"LLM planning error: {exc}"
                     message = f"LLM không tạo được SQL: {error_feedback}"
                     iteration_history.append(
@@ -555,12 +643,26 @@ async def process_agent_query_stream(
                         )
                     )
                     logger.warning("[StreamPipeline] %s", message)
+                    if _is_fatal_llm_failure(exc):
+                        async for item in emit(
+                            f"⛔ {message}. Dừng pipeline (lỗi LLM không thể retry).",
+                            attempt_number=attempt_number,
+                        ):
+                            yield item
+                        async for item in emit_error(
+                            f"Không kết nối được LLM: {exc}"
+                        ):
+                            yield item
+                        return
                     async for item in emit(
                         f"⚠️ {message}. Đang thử lại...",
                         attempt_number=attempt_number,
                     ):
                         yield item
                     continue
+
+                if not await ensure_client_connected():
+                    return
 
                 async for item in emit(
                     "🛡️ Đang kiểm tra an toàn AST Parser...",
@@ -594,6 +696,9 @@ async def process_agent_query_stream(
                     ):
                         yield item
                     continue
+
+                if not await ensure_client_connected():
+                    return
 
                 async for item in emit(
                     "🔌 Đang gọi Trino MCP "
@@ -673,7 +778,10 @@ async def process_agent_query_stream(
                         status="success",
                     )
                 )
-                async for item in emit("✅ Trino thực thi thành công.", attempt_number=attempt_number):
+                async for item in emit(
+                    "✅ Trino thực thi thành công.",
+                    attempt_number=attempt_number,
+                ):
                     yield item
                 break
             else:
@@ -692,14 +800,31 @@ async def process_agent_query_stream(
                 ) + "\n"
                 return
 
-            async for item in emit("🧼 Đang áp dụng Taint Filter và tổng hợp câu trả lời..."):
+            if not await ensure_client_connected():
+                return
+
+            async for item in emit(
+                "🧼 Đang áp dụng Taint Filter và tổng hợp câu trả lời..."
+            ):
                 yield item
             serialized_data = json.dumps(raw_data, ensure_ascii=False, default=str)
-            final_answer = await asyncio.to_thread(
-                llm_service.synthesize_final_answer,
-                request.query,
-                serialized_data,
-            )
+            try:
+                final_answer = await _synthesize_final_answer_async(
+                    request.query,
+                    serialized_data,
+                )
+            except (
+                LLMNonRetryableError,
+                LLMTimeoutError,
+                asyncio.TimeoutError,
+                RuntimeError,
+                ValueError,
+            ) as exc:
+                async for item in emit_error(
+                    f"Không tổng hợp được câu trả lời từ LLM: {exc}"
+                ):
+                    yield item
+                return
             payload = SecurePipelineResponse(
                 status="success",
                 total_iterations_used=len(iteration_history),

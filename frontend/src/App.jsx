@@ -3,6 +3,7 @@ import mermaid from 'mermaid'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  Activity,
   AlertTriangle,
   Bot,
   CheckCircle2,
@@ -11,6 +12,7 @@ import {
   Code2,
   FileJson,
   GitBranch,
+  Info,
   LockKeyhole,
   Network,
   Play,
@@ -19,29 +21,25 @@ import {
   Terminal,
   XCircle,
 } from 'lucide-react'
+import { rolePermissions, roles } from './config/rolePermissions'
 import { scenarios } from './config/scenarios'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-const roles = ['analyst', 'sales', 'support', 'hr', 'admin']
 
 const tabs = [
-  { id: 'monitor', label: 'Pipeline Monitor', icon: ActivityIcon },
+  { id: 'monitor', label: 'Pipeline Monitor', icon: Activity },
   { id: 'raw', label: 'Raw Data', icon: FileJson },
   { id: 'theory', label: 'Architecture & Theory', icon: Network },
   { id: 'comparison', label: 'API Comparison', icon: GitBranch },
 ]
-
-function ActivityIcon({ size = 16 }) {
-  return <span className="activity-icon" style={{ width: size, height: size }} />
-}
 
 function MermaidDiagram() {
   const [svg, setSvg] = useState('')
 
   useEffect(() => {
     let active = true
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' })
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' })
     mermaid.render('secure-bi-architecture', `
       flowchart LR
         U[User / Red Team] --> API[FastAPI API]
@@ -82,6 +80,33 @@ function Metric({ label, value, icon: Icon }) {
   )
 }
 
+function RolePermissionTooltip({ role }) {
+  const policy = rolePermissions[role]
+  if (!policy) return null
+
+  const flag = (value) => (value ? 'Yes' : 'No')
+
+  return (
+    <span className="role-info">
+      <button type="button" className="role-info-btn" aria-label={`Quyền của role ${role}`}>
+        <Info size={13} />
+      </button>
+      <div className="role-tooltip" role="tooltip">
+        <div className="role-tooltip-title">{role.toUpperCase()} POLICY</div>
+        <div className="role-tooltip-row"><span>Catalogs</span><strong>{policy.catalogs.join(', ')}</strong></div>
+        <div className="role-tooltip-row"><span>Export file</span><strong>{flag(policy.canExportFile)}</strong></div>
+        <div className="role-tooltip-row"><span>Access PII</span><strong>{flag(policy.canAccessPii)}</strong></div>
+        <div className="role-tooltip-row"><span>Execute DDL</span><strong>{flag(policy.canExecuteDdl)}</strong></div>
+        <div className="role-tooltip-row"><span>Max rows</span><strong>{policy.maxRowLimit.toLocaleString()}</strong></div>
+        <div className="role-tooltip-section">Allowed tables</div>
+        <ul>{policy.allowed.map((table) => <li key={table}>{table}</li>)}</ul>
+        <div className="role-tooltip-section">Denied tables</div>
+        {policy.denied.length ? <ul>{policy.denied.map((table) => <li key={table}>{table}</li>)}</ul> : <p className="role-tooltip-empty">None</p>}
+      </div>
+    </span>
+  )
+}
+
 function App() {
   const [role, setRole] = useState('analyst')
   const [scenarioId, setScenarioId] = useState(scenarios[0].id)
@@ -92,6 +117,7 @@ function App() {
   const [result, setResult] = useState(null)
   const [executionSteps, setExecutionSteps] = useState([])
   const consoleRef = useRef(null)
+  const abortControllerRef = useRef(null)
 
   const scenario = useMemo(() => scenarios.find((item) => item.id === scenarioId) || scenarios[0], [scenarioId])
 
@@ -100,6 +126,12 @@ function App() {
     if (consoleElement) consoleElement.scrollTop = consoleElement.scrollHeight
   }, [executionSteps])
 
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort()
+    }
+  }, [])
+
   const selectScenario = (event) => {
     const next = scenarios.find((item) => item.id === event.target.value) || scenarios[0]
     setScenarioId(next.id)
@@ -107,8 +139,16 @@ function App() {
     setError('')
   }
 
+  const cancelQuery = () => {
+    abortControllerRef.current?.abort()
+  }
+
   const executeQuery = async () => {
     if (!query.trim() || loading) return
+    abortControllerRef.current?.abort()
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     setLoading(true)
     setError('')
     setResult(null)
@@ -119,6 +159,7 @@ function App() {
       const response = await fetch(`${API_BASE_URL}/agent/query_stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+        signal: controller.signal,
         body: JSON.stringify({
           query: query.trim(),
           role,
@@ -167,13 +208,20 @@ function App() {
       }
       if (buffer.trim()) handleLine(buffer)
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Không thể kết nối tới Secure Agent API.'
-      setError(message)
+      if (requestError?.name === 'AbortError') {
+        setError('Đã hủy pipeline.')
+        setExecutionSteps((steps) => [...steps, '⛔ Pipeline đã bị hủy.'])
+      } else {
+        const message = requestError instanceof Error ? requestError.message : 'Không thể kết nối tới Secure Agent API.'
+        setError(message)
+      }
       setResult(null)
     } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null
+      }
       setLoading(false)
     }
-
   }
 
   const rawData = result?.raw_data
@@ -194,7 +242,10 @@ function App() {
           <div className="pane-heading"><div><div className="eyebrow">RED TEAMING / INTERACTION</div><h2>Defense Console</h2></div><LockKeyhole size={18} className="muted" /></div>
 
           <div className="control-grid">
-            <label>ACTOR ROLE<select value={role} onChange={(event) => setRole(event.target.value)}>{roles.map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label>
+              <span className="label-with-info">ACTOR ROLE <RolePermissionTooltip role={role} /></span>
+              <select value={role} onChange={(event) => setRole(event.target.value)}>{roles.map((item) => <option key={item}>{item}</option>)}</select>
+            </label>
             <label>ATTACK SCENARIO<select value={scenarioId} onChange={selectScenario}>{scenarios.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
           </div>
 
@@ -206,13 +257,26 @@ function App() {
           </div>
 
           <label className="query-label">NATURAL LANGUAGE QUERY<textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nhập câu hỏi BI hoặc chọn một kịch bản..." /></label>
-          <button className="execute-button" onClick={executeQuery} disabled={loading || !query.trim()}>{loading ? <><RefreshCw size={17} className="spin" /> RUNNING PIPELINE...</> : <><Play size={17} /> EXECUTE SECURE QUERY</>}</button>
+          <div className="action-row">
+            <button className="execute-button" onClick={executeQuery} disabled={loading || !query.trim()}>{loading ? <><RefreshCw size={17} className="spin" /> RUNNING PIPELINE...</> : <><Play size={17} /> EXECUTE SECURE QUERY</>}</button>
+            {loading && <button type="button" className="cancel-button" onClick={cancelQuery}><XCircle size={17} /> CANCEL</button>}
+          </div>
 
-          {error && <div className="error-banner"><XCircle size={17} /><div><strong>Request failed</strong><span>{error}</span></div></div>}
+          {error && <div className="error-banner"><XCircle size={17} /><div><strong>{error === 'Đã hủy pipeline.' ? 'Cancelled' : 'Request failed'}</strong><span>{error}</span></div></div>}
 
-          <div className="answer-card">
-            <div className="card-kicker"><Bot size={14} /> FINAL ANSWER / TAINT FILTERED</div>
-            {loading ? <div className="skeleton-stack"><span /><span /><span /></div> : result?.final_answer ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{result.final_answer}</ReactMarkdown></div> : <div className="empty-state">Kết quả tổng hợp an toàn sẽ xuất hiện tại đây sau khi pipeline hoàn tất.</div>}
+          <div className="attempts-card">
+            <div className="card-kicker"><RefreshCw size={14} /> REFLEXION HISTORY</div>
+            {loading ? <div className="skeleton-stack"><span /><span /><span /></div> : result?.iteration_history?.length ? (
+              <div className="history-list">
+                {result.iteration_history.map((item) => (
+                  <div className={`history-item ${item.status === 'success' ? 'history-success' : 'history-failure'}`} key={item.attempt_number}>
+                    <div className="history-top"><span className="attempt">ATTEMPT {String(item.attempt_number).padStart(2, '0')}</span><StatusBadge status={item.status} /></div>
+                    <div className="sql-block"><Code2 size={14} /><code>{item.generated_sql || 'No SQL generated'}</code></div>
+                    {item.error_message && <div className="history-error"><AlertTriangle size={14} /> {item.error_message}</div>}
+                  </div>
+                ))}
+              </div>
+            ) : <div className="empty-state">Lịch sử attempt sẽ xuất hiện tại đây sau khi pipeline chạy.</div>}
           </div>
         </aside>
 
@@ -251,13 +315,11 @@ function Monitor({ result }) {
       <Metric label="ITERATIONS" value={result.total_iterations_used ?? 0} icon={RefreshCw} />
       <Metric label="DB EXECUTION" value={`${Number(result.execution_time_seconds || 0).toFixed(3)}s`} icon={Clock3} />
     </div>
-    <div className="section-title"><span>REFLEXION HISTORY</span><span className="count-chip">{result.iteration_history?.length || 0} ATTEMPTS</span></div>
-    <div className="history-list">{(result.iteration_history || []).map((item) => <div className={`history-item ${item.status === 'success' ? 'history-success' : 'history-failure'}`} key={item.attempt_number}>
-      <div className="history-top"><span className="attempt">ATTEMPT {String(item.attempt_number).padStart(2, '0')}</span><StatusBadge status={item.status} /></div>
-      <div className="sql-block"><Code2 size={14} /><code>{item.generated_sql || 'No SQL generated'}</code></div>
-      {item.error_message && <div className="history-error"><AlertTriangle size={14} /> {item.error_message}</div>}
-    </div>)}</div>
     {result.status === 'circuit_breaker_timeout' && <div className="error-banner"><Clock3 size={17} /><div><strong>Circuit breaker opened</strong><span>Trino query exceeded the configured execution budget.</span></div></div>}
+    <div className="answer-card">
+      <div className="card-kicker"><Bot size={14} /> FINAL ANSWER / TAINT FILTERED</div>
+      {result?.final_answer ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{result.final_answer}</ReactMarkdown></div> : <div className="empty-state">Không có câu trả lời an toàn từ pipeline.</div>}
+    </div>
   </div>
 }
 

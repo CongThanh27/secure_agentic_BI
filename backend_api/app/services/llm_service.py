@@ -1,10 +1,16 @@
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any
 
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import (
+    InvalidArgument,
+    PermissionDenied,
+    ResourceExhausted,
+    Unauthenticated,
+)
 from google.generativeai.types import HarmBlockThreshold, HarmCategory
 
 from app.core.config import settings
@@ -26,23 +32,94 @@ FORBIDDEN_SQL_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+_NON_RETRYABLE_MARKERS = (
+    "illegal header value",
+    "invalid metadata",
+    "api key not valid",
+    "api_key_invalid",
+    "invalid api key",
+    "permission denied",
+    "unauthenticated",
+    "credentials",
+    "not configured",
+)
+
+
+class LLMTimeoutError(TimeoutError):
+    """Raised when a single Gemini model call exceeds the configured timeout."""
+
+
+class LLMNonRetryableError(RuntimeError):
+    """Raised for auth/credential failures that must not trigger model fallback."""
+
+
+def _normalized_api_key() -> str:
+    raw = settings.gemini_api_key
+    if raw is None:
+        raise LLMNonRetryableError("GEMINI_API_KEY is not configured")
+    key = raw.strip()
+    if not key:
+        raise LLMNonRetryableError("GEMINI_API_KEY is not configured")
+    return key
+
+
+def _deduped_models() -> list[str]:
+    seen: set[str] = set()
+    models: list[str] = []
+    for model_name in settings.available_models:
+        if model_name and model_name not in seen:
+            seen.add(model_name)
+            models.append(model_name)
+    return models
+
+
+def is_non_retryable_llm_error(exc: BaseException) -> bool:
+    """Return True when retrying another model or reflexion iteration is useless."""
+    if isinstance(
+        exc,
+        (
+            LLMNonRetryableError,
+            LLMTimeoutError,
+            Unauthenticated,
+            PermissionDenied,
+            InvalidArgument,
+        ),
+    ):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _NON_RETRYABLE_MARKERS)
+
+
+def _generate_with_timeout(model: genai.GenerativeModel, prompt: str, timeout: float):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(model.generate_content, prompt)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            raise LLMTimeoutError(
+                f"Gemini call exceeded timeout of {timeout:.1f} seconds"
+            ) from exc
+
 
 def call_gemini_with_fallback(prompt: str) -> str:
-    """Generate a response, falling back to the next configured model on 429."""
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
-    if not settings.available_models:
-        raise RuntimeError("No Gemini models are configured")
+    """Generate a response, falling back to the next model only on 429 / soft errors."""
+    api_key = _normalized_api_key()
+    models = _deduped_models()
+    if not models:
+        raise LLMNonRetryableError("No Gemini models are configured")
 
-    genai.configure(api_key=settings.gemini_api_key)
+    timeout = max(1.0, float(settings.llm_timeout_seconds))
+    genai.configure(api_key=api_key)
     last_error: Exception | None = None
-    for model_name in settings.available_models:
+
+    for model_name in models:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
                 safety_settings=SAFETY_SETTINGS,
             )
-            result = model.generate_content(prompt)
+            result = _generate_with_timeout(model, prompt, timeout)
             text = getattr(result, "text", None)
             if not text:
                 raise RuntimeError(f"Gemini model '{model_name}' returned no text")
@@ -50,8 +127,25 @@ def call_gemini_with_fallback(prompt: str) -> str:
             return text
         except ResourceExhausted as exc:
             last_error = exc
-            logger.warning("Gemini model quota exhausted; falling back model=%s", model_name)
+            logger.warning(
+                "Gemini model quota exhausted; falling back model=%s", model_name
+            )
+        except (LLMNonRetryableError, LLMTimeoutError) as exc:
+            logger.error("Gemini non-retryable failure model=%s: %s", model_name, exc)
+            raise
+        except (Unauthenticated, PermissionDenied, InvalidArgument) as exc:
+            logger.error("Gemini auth/config failure model=%s: %s", model_name, exc)
+            raise LLMNonRetryableError(
+                f"Gemini authentication or configuration failed: {exc}"
+            ) from exc
         except Exception as exc:
+            if is_non_retryable_llm_error(exc):
+                logger.error(
+                    "Gemini non-retryable failure model=%s: %s", model_name, exc
+                )
+                raise LLMNonRetryableError(
+                    f"Gemini authentication or configuration failed: {exc}"
+                ) from exc
             last_error = exc
             logger.exception("Gemini model failed model=%s", model_name)
 

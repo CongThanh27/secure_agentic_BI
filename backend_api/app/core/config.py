@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     python_bin_path: str = sys.executable
     trino_mcp_dir: str | None = None
     gemini_api_key: str | None = None
+    llm_timeout_seconds: float = 20.0
     available_models: list[str] = [
         "models/gemini-2.5-flash",
         "models/gemini-3.5-flash",
