@@ -609,9 +609,15 @@ async def process_agent_query_stream(
                 if not await ensure_client_connected():
                     return
 
+                if attempt_number == 1:
+                    llm_status = "🧠 Đang gọi LLM để sinh kế hoạch SQL..."
+                else:
+                    llm_status = (
+                        "🧠 Đang gọi LLM để Reflexion kế hoạch SQL "
+                        f"(lần {attempt_number}/{request.max_iterations})..."
+                    )
                 async for item in emit(
-                    "🧠 Đang gọi LLM để sinh kế hoạch SQL "
-                    f"(Reflexion lần {attempt_number}/{request.max_iterations})...",
+                    llm_status,
                     attempt_number=attempt_number,
                 ):
                     yield item
@@ -691,7 +697,7 @@ async def process_agent_query_stream(
                     )
                     async for item in emit(
                         f"🚫 AST đã chặn truy vấn: {ast_reason}. "
-                        f"Đang tự phản ngẫm (lần {attempt_number})...",
+                        "Đang Reflexion để thử lại...",
                         attempt_number=attempt_number,
                     ):
                         yield item
@@ -763,8 +769,8 @@ async def process_agent_query_stream(
                         error_msg,
                     )
                     async for item in emit(
-                        f"🔄 Trino báo lỗi, đang tự phản ngẫm "
-                        f"(Reflexion lần {attempt_number}): {error_msg}",
+                        f"🔄 Trino báo lỗi, đang Reflexion để thử lại: "
+                        f"{error_msg}",
                         attempt_number=attempt_number,
                     ):
                         yield item
