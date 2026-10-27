@@ -107,6 +107,22 @@ def _database_error_message(error: BaseException) -> str:
     return str(error) or formatted
 
 
+def _preview_rows(data: object, limit: int = 10) -> object:
+    if isinstance(data, list):
+        return data[:limit]
+    if isinstance(data, tuple):
+        return list(data[:limit])
+    return data
+
+
+def _filtered_table_names(filtered_schema: str) -> list[str]:
+    return [
+        line.split(" (", 1)[0].split(". ", 1)[-1]
+        for line in filtered_schema.splitlines()
+        if ". " in line and " (" in line
+    ]
+
+
 @router.post(
     "/query",
     response_model=ChatResponse,
@@ -553,8 +569,14 @@ async def process_agent_query_stream(
     """Stream observable secure-pipeline progress as newline-delimited JSON."""
 
     async def event_stream():
-        async def emit(message: str, **extra: object):
+        async def emit(
+            message: str,
+            xray_data: dict | None = None,
+            **extra: object,
+        ):
             event = {"type": "step", "message": message, **extra}
+            if xray_data is not None:
+                event["xray_data"] = xray_data
             yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
             await asyncio.sleep(0.1)
 
@@ -584,6 +606,21 @@ async def process_agent_query_stream(
                 raise
             except SQLAlchemyError as exc:
                 raise RuntimeError("RBAC policy service is unavailable") from exc
+            async for item in emit(
+                "✅ Đã tải chính sách RBAC.",
+                xray_data={
+                    "step": "RBAC Authorization",
+                    "target": "MySQL Database",
+                    "execution_detail": (
+                        "SELECT allowed_catalogs, allowed_tables, denied_tables, "
+                        "can_export_file, max_row_limit FROM agent_role_permissions "
+                        f"WHERE role_name = '{request.role}'"
+                    ),
+                    "input": {"role": request.role},
+                    "output": {"permissions": permissions},
+                },
+            ):
+                yield item
 
             if not await ensure_client_connected():
                 return
@@ -599,6 +636,20 @@ async def process_agent_query_stream(
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeError("Metadata discovery service is unavailable") from exc
+            async for item in emit(
+                "✅ Đã lọc schema theo RBAC.",
+                xray_data={
+                    "step": "Metadata Discovery",
+                    "target": "Trino Catalog & RBAC Filter",
+                    "execution_detail": (
+                        "Lấy schema từ Trino cho các catalogs: "
+                        f"{permissions['allowed_catalogs']} và lọc giữ lại các bảng được phép."
+                    ),
+                    "input": {"allowed_catalogs": permissions["allowed_catalogs"]},
+                    "output": {"filtered_schema": _filtered_table_names(filtered_schema)},
+                },
+            ):
+                yield item
 
             iteration_history: list[ReflexionIteration] = []
             error_feedback: str | None = None
@@ -622,6 +673,7 @@ async def process_agent_query_stream(
                 ):
                     yield item
                 generated_sql = ""
+                planning_feedback = error_feedback
                 try:
                     agent_plan = await _generate_sql_plan_async(
                         request.query,
@@ -649,6 +701,23 @@ async def process_agent_query_stream(
                         )
                     )
                     logger.warning("[StreamPipeline] %s", message)
+                    async for item in emit(
+                        f"❌ LLM planning thất bại ở attempt {attempt_number}.",
+                        xray_data={
+                            "step": "LLM Planning / Reflexion",
+                            "attempt_number": attempt_number,
+                            "target": f"Gemini LLM (Model: {settings.available_models[0]})",
+                            "execution_detail": llm_service.build_sql_plan_prompt(
+                                request.query, filtered_schema, planning_feedback
+                            ),
+                            "input": {
+                                "query": request.query,
+                                "error_feedback": planning_feedback,
+                            },
+                            "error": error_feedback,
+                        },
+                    ):
+                        yield item
                     if _is_fatal_llm_failure(exc):
                         async for item in emit(
                             f"⛔ {message}. Dừng pipeline (lỗi LLM không thể retry).",
@@ -666,6 +735,24 @@ async def process_agent_query_stream(
                     ):
                         yield item
                     continue
+
+                async for item in emit(
+                    f"✅ LLM hoàn tất attempt {attempt_number}.",
+                    xray_data={
+                        "step": "LLM Planning / Reflexion",
+                        "attempt_number": attempt_number,
+                        "target": f"Gemini LLM (Model: {settings.available_models[0]})",
+                        "execution_detail": llm_service.build_sql_plan_prompt(
+                            request.query, filtered_schema, planning_feedback
+                        ),
+                        "input": {
+                            "query": request.query,
+                            "error_feedback": planning_feedback,
+                        },
+                        "output": agent_plan,
+                    },
+                ):
+                    yield item
 
                 if not await ensure_client_connected():
                     return
@@ -701,7 +788,41 @@ async def process_agent_query_stream(
                         attempt_number=attempt_number,
                     ):
                         yield item
+                    async for item in emit(
+                        f"❌ AST blocked attempt {attempt_number}.",
+                        xray_data={
+                            "step": "AST Validation",
+                            "attempt_number": attempt_number,
+                            "target": "sqlglot AST Validator",
+                            "execution_detail": (
+                                "Sử dụng thư viện sqlglot (dialect: trino) để phân tích "
+                                "Abstract Syntax Tree (AST) của câu lệnh SQL sinh ra. "
+                                "Đối chiếu các Node (Table, Column, Command Type) với "
+                                "ma trận quyền (allowed_tables) để chặn DDL/DML và "
+                                "kiểm soát truy cập."
+                            ),
+                            "input": generated_sql,
+                            "error": f"Blocked: {ast_reason}",
+                        },
+                    ):
+                        yield item
                     continue
+
+                async for item in emit(
+                    f"✅ AST passed attempt {attempt_number}.",
+                    xray_data={
+                        "step": "AST Validation",
+                        "attempt_number": attempt_number,
+                        "target": "sqlglot AST Validator",
+                        "execution_detail": (
+                            "Sử dụng thư viện sqlglot (dialect: trino) để phân tích "
+                            "Abstract Syntax Tree (AST) và đối chiếu với allowed_tables."
+                        ),
+                        "input": generated_sql,
+                        "output": "Passed",
+                    },
+                ):
+                    yield item
 
                 if not await ensure_client_connected():
                     return
@@ -733,6 +854,21 @@ async def process_agent_query_stream(
                     async for item in emit(
                         f"⏱️ Circuit Breaker dừng truy vấn: {message}",
                         attempt_number=attempt_number,
+                    ):
+                        yield item
+                    async for item in emit(
+                        f"❌ Trino timeout ở attempt {attempt_number}.",
+                        xray_data={
+                            "step": "Trino Execution",
+                            "attempt_number": attempt_number,
+                            "target": "Trino Federated Engine (via MCP Proxy)",
+                            "execution_detail": (
+                                "Gọi tool 'execute_query_read_only' với tham số query: "
+                                f"{generated_sql}"
+                            ),
+                            "input": generated_sql,
+                            "error": message,
+                        },
                     ):
                         yield item
                     payload = SecurePipelineResponse(
@@ -774,6 +910,21 @@ async def process_agent_query_stream(
                         attempt_number=attempt_number,
                     ):
                         yield item
+                    async for item in emit(
+                        f"❌ Trino execution failed ở attempt {attempt_number}.",
+                        xray_data={
+                            "step": "Trino Execution",
+                            "attempt_number": attempt_number,
+                            "target": "Trino Federated Engine (via MCP Proxy)",
+                            "execution_detail": (
+                                "Gọi tool 'execute_query_read_only' với tham số query: "
+                                f"{generated_sql}"
+                            ),
+                            "input": generated_sql,
+                            "error": error_msg,
+                        },
+                    ):
+                        yield item
                     continue
 
                 iteration_history.append(
@@ -787,6 +938,17 @@ async def process_agent_query_stream(
                 async for item in emit(
                     "✅ Trino thực thi thành công.",
                     attempt_number=attempt_number,
+                    xray_data={
+                        "step": "Trino Execution",
+                        "attempt_number": attempt_number,
+                        "target": "Trino Federated Engine (via MCP Proxy)",
+                        "execution_detail": (
+                            "Gọi tool 'execute_query_read_only' với tham số query: "
+                            f"{generated_sql}"
+                        ),
+                        "input": generated_sql,
+                        "output": _preview_rows(raw_data),
+                    },
                 ):
                     yield item
                 break
@@ -826,11 +988,43 @@ async def process_agent_query_stream(
                 RuntimeError,
                 ValueError,
             ) as exc:
+                async for item in emit(
+                    "❌ Synthesis thất bại.",
+                    xray_data={
+                        "step": "Taint Filter & Synthesis",
+                        "target": "Gemini LLM (Synthesis)",
+                        "execution_detail": llm_service.build_synthesis_prompt(
+                            request.query, serialized_data
+                        ),
+                        "input": {
+                            "query": request.query,
+                            "raw_data": _preview_rows(raw_data),
+                        },
+                        "error": str(exc),
+                    },
+                ):
+                    yield item
                 async for item in emit_error(
                     f"Không tổng hợp được câu trả lời từ LLM: {exc}"
                 ):
                     yield item
                 return
+            async for item in emit(
+                "✅ Đã tổng hợp câu trả lời an toàn.",
+                xray_data={
+                    "step": "Taint Filter & Synthesis",
+                    "target": "Gemini LLM (Synthesis)",
+                    "execution_detail": llm_service.build_synthesis_prompt(
+                        request.query, serialized_data
+                    ),
+                    "input": {
+                        "query": request.query,
+                        "raw_data": _preview_rows(raw_data),
+                    },
+                    "output": final_answer,
+                },
+            ):
+                yield item
             payload = SecurePipelineResponse(
                 status="success",
                 total_iterations_used=len(iteration_history),

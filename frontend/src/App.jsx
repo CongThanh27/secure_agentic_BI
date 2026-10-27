@@ -12,6 +12,7 @@ import {
   Code2,
   FileJson,
   GitBranch,
+  ScanLine,
   Info,
   LockKeyhole,
   Network,
@@ -29,6 +30,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 const tabs = [
   { id: 'monitor', label: 'Pipeline Monitor', icon: Activity },
+  { id: 'xray', label: 'Execution Trace', icon: ScanLine },
   { id: 'raw', label: 'Raw Data', icon: FileJson },
   { id: 'theory', label: 'Architecture & Theory', icon: Network },
   { id: 'comparison', label: 'API Comparison', icon: GitBranch },
@@ -116,6 +118,7 @@ function App() {
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const [executionSteps, setExecutionSteps] = useState([])
+  const [xrayEvents, setXrayEvents] = useState([])
   const consoleRef = useRef(null)
   const abortControllerRef = useRef(null)
 
@@ -153,6 +156,7 @@ function App() {
     setError('')
     setResult(null)
     setExecutionSteps([])
+    setXrayEvents([])
     setActiveTab('monitor')
 
     try {
@@ -191,6 +195,9 @@ function App() {
 
         if (event.type === 'step') {
           setExecutionSteps((steps) => [...steps, event.message || 'Đang xử lý...'])
+          if (event.xray_data && typeof event.xray_data === 'object') {
+            setXrayEvents((events) => [...events, event.xray_data])
+          }
         } else if (event.type === 'final_result') {
           setResult(event.data)
         } else if (event.type === 'error') {
@@ -288,12 +295,57 @@ function App() {
           {loading && <ThinkingConsole steps={executionSteps} consoleRef={consoleRef} />}
 
           {activeTab === 'monitor' && result && !loading && <Monitor result={result} />}
+          {activeTab === 'xray' && <ExecutionTrace events={xrayEvents} loading={loading} />}
           {activeTab === 'raw' && <pre className="raw-panel">{prettyRawData}</pre>}
           {activeTab === 'theory' && <Theory />}
           {activeTab === 'comparison' && <Comparison />}
         </section>
       </section>
     </main>
+  )
+}
+
+function TraceValue({ label, value, code = false, json = false }) {
+  if (value === undefined || value === null || value === '') return null
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  return (
+    <div className="trace-field">
+      <div className="trace-label">{label}</div>
+      {json && typeof value === 'object' ? <pre className="trace-json">{serialized}</pre> : code ? <pre className="trace-code">{serialized}</pre> : <pre className="trace-text">{serialized}</pre>}
+    </div>
+  )
+}
+
+function ExecutionTrace({ events, loading }) {
+  return (
+    <div className="execution-trace">
+      <div className="trace-summary">
+        <div><div className="eyebrow">X-RAY / STRUCTURED EVENTS</div><h2>Execution Trace</h2></div>
+        <span className="count-chip">{events.length} EVENTS</span>
+      </div>
+      {!events.length && <div className="empty-state">{loading ? 'Đang chờ bước hoàn tất để ghi nhận X-Ray...' : 'Chạy pipeline để xem trace chi tiết.'}</div>}
+      <div className="trace-list">
+        {events.map((event, index) => {
+          const failed = Boolean(event.error)
+          return (
+            <details className={`trace-card ${failed ? 'trace-failed' : ''}`} open key={`${event.step}-${event.attempt_number || 'single'}-${index}`}>
+              <summary>
+                <span className="trace-index">{String(index + 1).padStart(2, '0')}</span>
+                <span>{event.step}{event.attempt_number ? ` / Attempt ${event.attempt_number}` : ''}</span>
+                <span className={`trace-state ${failed ? 'trace-state-error' : 'trace-state-ok'}`}>{failed ? 'ERROR' : 'CAPTURED'}</span>
+              </summary>
+              <div className="trace-content">
+                <TraceValue label="Target" value={event.target} />
+                <TraceValue label="Execution Detail / Prompt" value={event.execution_detail} />
+                <TraceValue label="Input" value={event.input} code={typeof event.input === 'string' && /select|from|where/i.test(event.input)} json={typeof event.input === 'object'} />
+                {event.output !== undefined && <TraceValue label="Output" value={event.output} json={typeof event.output === 'object'} code={typeof event.output === 'string' && /select|from|where/i.test(event.output)} />}
+                {event.error && <TraceValue label="Error" value={event.error} />}
+              </div>
+            </details>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
